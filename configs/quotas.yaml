@@ -1,0 +1,33 @@
+sqs:
+  standard:
+    rate_limit: 100000  # Nearly unlimited, but we cap it
+    burst_limit: 100000
+  fifo:
+    tps_limit: 300      # Transactions per second per API action
+    burst_limit: 300
+    batch_tps_limit: 3000  # With batching (10 messages per call)
+  default_queue_limit: 1000
+
+dynamodb:
+  on_demand:
+    initial_read_rps: 4000   # Initial read requests per second
+    initial_write_rps: 4000  # Initial write requests per second
+    account_max_read_rps: 40000
+    account_max_write_rps: 40000
+    max_table_rps: 40000
+  provisioned:
+    per_table_max_rcu: 40000
+    per_table_max_wcu: 40000
+    account_max_rcu: 80000
+    account_max_wcu: 80000
+    min_capacity: 1
+  default:
+    table_max_rcu: 10000
+    table_max_wcu: 10000
+
+proxy:
+  host: "0.0.0.0"
+  port: 4567
+  upstream_url: "http://localhost:4566"
+  read_timeout: 30s
+  write_timeout: 30s
