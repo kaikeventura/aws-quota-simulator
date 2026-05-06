@@ -288,7 +288,10 @@ QUOTA_SQS_FIFO_TPS=100 UPSTREAM_URL=http://localhost:4566 ./quota-simulator
 ### Testes
 
 ```bash
-# Rodar todos os testes
+# Rodar testes unitários apenas (sem Docker)
+go test -short ./...
+
+# Rodar todos os testes (requer Docker rodando)
 go test ./...
 
 # Com verbose
@@ -296,7 +299,42 @@ go test -v ./internal/...
 
 # Cover
 go test -cover ./...
+
+# Pular explicitamente testes de integração
+SKIP_INTEGRATION=1 go test ./...
 ```
+
+#### Testes de Integração com Testcontainers
+
+O projeto inclui testes de integração que usam testcontainers para validar o comportamento de throttling:
+
+```bash
+# Rodar apenas testes de integração (requer Docker)
+go test -v ./internal/quota/services/... -run "Integration"
+
+# Ver logs dos containers durante os testes
+go test -v -count=1 ./internal/quota/services/... -run "TestSQSFIFO"
+```
+
+**Casos de teste disponíveis:**
+
+| Teste | Descrição |
+|-------|-----------|
+| `TestSQSFIFOThrottling_SingleMessage` | Valida throttling em SendMessage (FIFO) |
+| `TestSQSFIFOThrottling_BatchMessages` | Valida throttling em SendMessageBatch |
+| `TestSQSStandardQueue_NoThrottle` | Valida que standard queues não têm throttle |
+| `TestSQSMultipleQueues_IndependentThrottling` | Valida throttle independente por fila |
+| `TestSQSReceiveMessage_Throttling` | Testa operações de receive |
+| `TestSQSQueueCreation_WithoutThrottling` | Valida que criação de filas não é throttleada |
+
+**Configuração de quotas para testes:**
+
+Os testes de integração usam quotas reduzidas para permitir validação rápida:
+
+- `QUOTA_SQS_FIFO_TPS=5` (em vez de 300)
+- `QUOTA_SQS_FIFO_BATCH_TPS=10` (em vez de 3000)
+
+Isso permite testar throttling em poucos segundos ao invés de precisar atingir 300+ TPS.
 
 ### Adicionar novo serviço
 

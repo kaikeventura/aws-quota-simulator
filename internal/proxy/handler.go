@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -57,9 +58,25 @@ func NewProxyHandler(upstreamURL string, quotaManager *quota.QuotaManager) (*Pro
 
 func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
+
+	if path == "/health" || path == "/health/" {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+		return
+	}
+
+	if path == "/debug" || path == "/debug/" {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fmt.Sprintf("Path: %s, Host: %s, Action: %s, Body: %s", path, r.Host, r.Header.Get("Action"), string(bodyBytes))))
+		return
+	}
 	query := r.URL.RawQuery
 	host := r.Host
 	action := r.Header.Get("X-Amz-Target")
+	if action == "" {
+		action = r.Header.Get("Action")
+	}
 
 	service := detectService(path)
 	if service == "" {
@@ -68,8 +85,19 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if service == "" {
 		service = detectServiceFromQuery(query)
 	}
+	if service == "" {
+		service = detectServiceFromAction(action)
+	}
 
-	log.Printf("Request: %s %s?%s Host:%s Action:%s Service:%s", r.Method, path, query, host, action, service)
+	fmt.Printf("[REQUEST] path=%s host=%s action=%s service=%s\n", path, host, action, service)
+
+	if service == "" {
+		log.Printf("WARNING: Could not detect service for path=%s host=%s action=%s query=%s", path, host, action, query)
+	}
+
+	if service == "" {
+		log.Printf("[DEBUG] WARNING: Could not detect service for path=%s host=%s action=%s", path, host, action)
+	}
 
 	if service == "sqs" || service == "dynamodb" {
 		bodyBytes, err := io.ReadAll(r.Body)
@@ -112,19 +140,21 @@ func (h *ProxyHandler) checkSQSQuota(path, query, action string, body []byte) (b
 	sqsSvc := sqsSvcRaw.(*services.SQSService)
 
 	operation, _ := sqsSvc.DetectOperationFromAction(action, string(body))
-	log.Printf("SQS check - operation: %s, action: %s, body len: %d", operation, action, len(body))
+	log.Printf("[DEBUG] SQS check - action: '%s', operation: '%s', body len: %d", action, operation, len(body))
 	if operation == "" {
+		log.Printf("[DEBUG] No operation detected, allowing request")
 		return true, ""
 	}
 
 	queueURL := sqsSvc.ParseQueueURL(body)
 	if queueURL == "" {
 		queueURL = "default"
+		log.Printf("[DEBUG] No queue URL in body, using default")
 	}
 	isFIFO := sqsSvc.IsFIFOQueue(queueURL)
 	isBatch := sqsSvc.IsBatchOperation(body)
 
-	log.Printf("SQS - queue: %s, FIFO: %v, batch: %v", queueURL, isFIFO, isBatch)
+	log.Printf("[DEBUG] SQS - parsed queue: '%s', isFIFO: %v, isBatch: %v", queueURL, isFIFO, isBatch)
 
 	shouldThrottle, tpsLimit := sqsSvc.ShouldThrottle(operation, isFIFO, isBatch)
 	if !shouldThrottle {
@@ -204,6 +234,17 @@ func detectServiceFromQuery(query string) string {
 	}
 	if strings.Contains(queryLower, "putitem") || strings.Contains(queryLower, "getitem") ||
 		strings.Contains(queryLower, "createtable") || strings.Contains(queryLower, "query") {
+		return "dynamodb"
+	}
+	return ""
+}
+
+func detectServiceFromAction(action string) string {
+	actionLower := strings.ToLower(action)
+	if strings.Contains(actionLower, "sqs") || strings.Contains(actionLower, "amazonsqs") {
+		return "sqs"
+	}
+	if strings.Contains(actionLower, "dynamodb") || strings.Contains(actionLower, "amazondynamodb") {
 		return "dynamodb"
 	}
 	return ""
