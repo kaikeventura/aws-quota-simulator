@@ -6,11 +6,42 @@
 
 Quando você desenvolve localmente com Floci ou LocalStack, os serviços funcionam perfeitamente sem limites. Mas na AWS real existem quotas de throttling que podem quebrar sua aplicação em produção.
 
-**Este serviço resolve isso** - ele proxy as requisições e aplica os mesmos limites de taxa (rate limits) que a AWS real:
+**Este serviço resolve isso** - ele proxy as requisições e aplica os mesmos limites de taxa (rate limits) que a AWS real.
 
-- **SQS FIFO**: 300 TPS (send/receive/delete), 3000 TPS com batching
-- **DynamoDB**: 40,000 RPS por tabela (on-demand)
-- Responses de erro compatíveis com SDK da AWS
+---
+
+## Compatibilidade
+
+### ✅ Serviços Suportados
+
+| Serviço | Status | Operações Suportadas |
+|---------|--------|---------------------|
+| **SQS FIFO** | ✅ Completo | SendMessage, ReceiveMessage, DeleteMessage, SendMessageBatch, DeleteMessageBatch |
+| **SQS Standard** | ✅ Completo | Sem throttling (ilimitado) |
+| **DynamoDB** | ⚠️ Parcial | PutItem, GetItem (em desenvolvimento) |
+
+---
+
+### SQS FIFO - Quotas Implementadas
+
+| Operação | Limite Padrão (AWS) | Configurável | Variável de Ambiente |
+|----------|---------------------|--------------|---------------------|
+| SendMessage | 300 TPS | ✅ | `QUOTA_SQS_FIFO_TPS` |
+| ReceiveMessage | 300 TPS | ✅ | `QUOTA_SQS_FIFO_RECEIVE_TPS` |
+| DeleteMessage | 300 TPS | ✅ | `QUOTA_SQS_FIFO_DELETE_TPS` |
+| SendMessageBatch | 3,000 TPS | ✅ | `QUOTA_SQS_FIFO_BATCH_TPS` |
+| DeleteMessageBatch | 3,000 TPS | ✅ | `QUOTA_SQS_FIFO_BATCH_TPS` |
+
+### DynamoDB - Quotas (Em Desenvolvimento)
+
+| Operação | Tipo | Status |
+|----------|------|--------|
+| PutItem | Write | ⚠️ Parcial |
+| GetItem | Read | ⚠️ Parcial |
+| BatchWriteItem | Write | ⏳ Planejado |
+| BatchGetItem | Read | ⏳ Planejado |
+
+---
 
 ## Arquitetura
 
@@ -320,19 +351,18 @@ go test -v -count=1 ./internal/quota/services/... -run "TestSQSFIFO"
 
 | Teste | Descrição |
 |-------|-----------|
-| `TestSQSFIFOThrottling_SingleMessage` | Valida throttling em SendMessage (FIFO) |
-| `TestSQSFIFOThrottling_BatchMessages` | Valida throttling em SendMessageBatch |
-| `TestSQSStandardQueue_NoThrottle` | Valida que standard queues não têm throttle |
-| `TestSQSMultipleQueues_IndependentThrottling` | Valida throttle independente por fila |
-| `TestSQSReceiveMessage_Throttling` | Testa operações de receive |
-| `TestSQSQueueCreation_WithoutThrottling` | Valida que criação de filas não é throttleada |
+| `TestStandardNoThrottle` | Valida que standard queues não têm throttle |
+| `TestFIFOThrottling` | Valida throttling em SendMessage (FIFO) |
+| `TestFIFOReceiveThrottling` | Valida throttling em ReceiveMessage (FIFO) |
+| `TestFIFODeleteThrottling` | Valida throttling em DeleteMessageBatch (FIFO) |
 
 **Configuração de quotas para testes:**
 
 Os testes de integração usam quotas reduzidas para permitir validação rápida:
 
 - `QUOTA_SQS_FIFO_TPS=5` (em vez de 300)
-- `QUOTA_SQS_FIFO_BATCH_TPS=10` (em vez de 3000)
+- `QUOTA_SQS_FIFO_RECEIVE_TPS=500` (receive não throttleado nos testes)
+- `QUOTA_SQS_FIFO_BATCH_TPS=5` (em vez de 3000)
 
 Isso permite testar throttling em poucos segundos ao invés de precisar atingir 300+ TPS.
 

@@ -20,6 +20,8 @@ services:
     environment:
       - UPSTREAM_URL=http://floci:4566
       - QUOTA_SQS_FIFO_TPS=300
+      - QUOTA_SQS_FIFO_RECEIVE_TPS=300
+      - QUOTA_SQS_FIFO_DELETE_TPS=300
       - QUOTA_DYNAMODB_ONDEMAND_MAX_RPS=40000
       - STARTUP_DELAY=5
     depends_on:

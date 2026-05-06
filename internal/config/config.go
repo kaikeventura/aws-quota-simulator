@@ -26,9 +26,11 @@ type StandardQueueConfig struct {
 }
 
 type FIFOQueueConfig struct {
-	TPSLimit      int64 `yaml:"tps_limit"`
-	BurstLimit    int64 `yaml:"burst_limit"`
-	BatchTPSLimit int64 `yaml:"batch_tps_limit"`
+	TPSLimit         int64 `yaml:"tps_limit"`
+	ReceiveTPSLimit  int64 `yaml:"receive_tps_limit"`
+	DeleteTPSLimit   int64 `yaml:"delete_tps_limit"`
+	BurstLimit       int64 `yaml:"burst_limit"`
+	BatchTPSLimit    int64 `yaml:"batch_tps_limit"`
 }
 
 type DynamoDBConfig struct {
@@ -90,6 +92,16 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("QUOTA_SQS_FIFO_TPS"); v != "" {
 		if val := parseInt64(v); val > 0 {
 			cfg.SQS.FIFO.TPSLimit = val
+		}
+	}
+	if v := os.Getenv("QUOTA_SQS_FIFO_RECEIVE_TPS"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.SQS.FIFO.ReceiveTPSLimit = val
+		}
+	}
+	if v := os.Getenv("QUOTA_SQS_FIFO_DELETE_TPS"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.SQS.FIFO.DeleteTPSLimit = val
 		}
 	}
 	if v := os.Getenv("QUOTA_SQS_FIFO_BATCH_TPS"); v != "" {

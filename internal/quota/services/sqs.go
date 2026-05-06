@@ -116,16 +116,16 @@ func (s *SQSService) DetectOperationFromAction(action, body string) (operation, 
 
 func (s *SQSService) ShouldThrottle(operation string, isFIFO, isBatch bool) (shouldThrottle bool, tpsLimit int64) {
 	if !isFIFO {
-		// Standard queues have very high limits
 		return false, s.cfg.SQS.Standard.RateLimit
 	}
 
 	switch operation {
-	case "send", "receive", "delete":
-		if isBatch {
-			return true, s.cfg.SQS.FIFO.BatchTPSLimit
-		}
+	case "send":
 		return true, s.cfg.SQS.FIFO.TPSLimit
+	case "receive":
+		return true, s.cfg.SQS.FIFO.ReceiveTPSLimit
+	case "delete":
+		return true, s.cfg.SQS.FIFO.DeleteTPSLimit
 	case "send_batch", "delete_batch":
 		return true, s.cfg.SQS.FIFO.BatchTPSLimit
 	default:
