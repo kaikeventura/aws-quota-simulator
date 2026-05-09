@@ -113,6 +113,22 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
+			if service == "sqs" {
+				sqsSvcRaw, ok := h.quotaManager.GetService("sqs")
+				if ok {
+					sqsSvc := sqsSvcRaw.(*services.SQSService)
+					operation, _ := sqsSvc.DetectOperationFromAction(action, string(bodyBytes))
+					queueURL := sqsSvc.ParseQueueURL(bodyBytes)
+					isFIFO := sqsSvc.IsFIFOQueue(queueURL)
+
+					if h.checkSQDeduplication(operation, isFIFO, queueURL, bodyBytes) {
+						log.Printf("Duplicate message detected for queue: %s", queueURL)
+						errors.SendDuplicateMessageError(w, queueURL)
+						return
+					}
+				}
+			}
+
 			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			r.ContentLength = int64(len(bodyBytes))
 		}
@@ -172,6 +188,35 @@ func (h *ProxyHandler) checkSQSQuota(path, query, action string, body []byte) (b
 	}
 
 	return false, "Rate exceeded for queue: " + queueURL
+}
+
+func (h *ProxyHandler) checkSQDeduplication(operation string, isFIFO bool, queueURL string, body []byte) bool {
+	if !isFIFO || operation != "send" {
+		return false
+	}
+
+	sqsSvcRaw, ok := h.quotaManager.GetService("sqs")
+	if !ok {
+		return false
+	}
+	sqsSvc := sqsSvcRaw.(*services.SQSService)
+
+	dedupID := sqsSvc.ParseMessageDeduplicationID(body)
+
+	if dedupID == "" && h.quotaManager.IsContentBasedDeduplication(queueURL) {
+		dedupID = sqsSvc.CalculateContentBasedDedupID(body)
+	}
+
+	if dedupID == "" {
+		return false
+	}
+
+	if h.quotaManager.IsDuplicate(queueURL, dedupID) {
+		return true
+	}
+
+	h.quotaManager.AddDeduplicationID(queueURL, dedupID)
+	return false
 }
 
 func (h *ProxyHandler) checkDynamoDBQuota(path string, body []byte) (bool, string) {
