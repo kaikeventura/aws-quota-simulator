@@ -103,10 +103,12 @@ func (rl *ResourceLimiter) GetOrCreate(resource string, rate, burst int64) *Toke
 }
 
 type QuotaManager struct {
-	services   map[string]QuotaService
-	limiters   map[string]*ResourceLimiter
-	limiterMu  sync.RWMutex
-	cfg        *config.Config
+	services    map[string]QuotaService
+	limiters    map[string]*ResourceLimiter
+	limiterMu   sync.RWMutex
+	cfg         *config.Config
+	dedupCache  *DedupCache
+	fifoAttrs   *FIFOAttributesCache
 }
 
 func NewQuotaManager(cfg *config.Config) *QuotaManager {
@@ -123,6 +125,9 @@ func NewManager(cfg *config.Config) *QuotaManager {
 		limiters:  make(map[string]*ResourceLimiter),
 		cfg:       cfg,
 	}
+
+	m.dedupCache = NewDedupCache(cfg.SQS.Dedup.TTLMinutes)
+	m.fifoAttrs = NewFIFOAttributesCache(cfg.SQS.Dedup.AttributesCacheTTLMin, cfg.Proxy.UpstreamURL)
 
 	m.RegisterService("sqs", services.NewSQSService(cfg))
 	m.RegisterService("dynamodb", services.NewDynamoDBService(cfg))
@@ -191,10 +196,25 @@ func (qm *QuotaManager) CheckRateLimit(service, resource string) (bool, string) 
 		return true, ""
 	}
 
-	// Use resource-specific bucket
 	if limiter.Allow(resource) {
 		return true, ""
 	}
 
 	return false, "Rate limit exceeded for " + resource
+}
+
+func (qm *QuotaManager) IsDuplicate(queueURL, dedupID string) bool {
+	return qm.dedupCache.IsDuplicate(queueURL, dedupID)
+}
+
+func (qm *QuotaManager) AddDeduplicationID(queueURL, dedupID string) {
+	qm.dedupCache.Add(queueURL, dedupID)
+}
+
+func (qm *QuotaManager) IsContentBasedDeduplication(queueURL string) bool {
+	return qm.fifoAttrs.IsContentBasedDeduplication(queueURL)
+}
+
+func (qm *QuotaManager) InvalidateFIFOAttributes(queueURL string) {
+	qm.fifoAttrs.Invalidate(queueURL)
 }

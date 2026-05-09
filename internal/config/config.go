@@ -18,6 +18,12 @@ type SQSConfig struct {
 	Standard StandardQueueConfig `yaml:"standard"`
 	FIFO     FIFOQueueConfig     `yaml:"fifo"`
 	DefaultQueueLimit int64    `yaml:"default_queue_limit"`
+	Dedup    DedupConfig       `yaml:"dedup"`
+}
+
+type DedupConfig struct {
+	TTLMinutes           int `yaml:"ttl_minutes"`
+	AttributesCacheTTLMin int `yaml:"attributes_cache_ttl_minutes"`
 }
 
 type StandardQueueConfig struct {
@@ -83,9 +89,19 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
+	setDefaults(&cfg)
 	applyEnvOverrides(&cfg)
 
 	return &cfg, nil
+}
+
+func setDefaults(cfg *Config) {
+	if cfg.SQS.Dedup.TTLMinutes <= 0 {
+		cfg.SQS.Dedup.TTLMinutes = 5
+	}
+	if cfg.SQS.Dedup.AttributesCacheTTLMin <= 0 {
+		cfg.SQS.Dedup.AttributesCacheTTLMin = 5
+	}
 }
 
 func applyEnvOverrides(cfg *Config) {
@@ -121,6 +137,11 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("UPSTREAM_URL"); v != "" {
 		cfg.Proxy.UpstreamURL = v
+	}
+	if v := os.Getenv("SQS_DEDUP_TTL_MINUTES"); v != "" {
+		if val := parseInt(v); val > 0 {
+			cfg.SQS.Dedup.TTLMinutes = val
+		}
 	}
 }
 

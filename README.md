@@ -16,13 +16,15 @@ Quando você desenvolve localmente com Floci ou LocalStack, os serviços funcion
 
 | Serviço | Status | Operações Suportadas |
 |---------|--------|---------------------|
-| **SQS FIFO** | ✅ Completo | SendMessage, ReceiveMessage, DeleteMessage, SendMessageBatch, DeleteMessageBatch |
+| **SQS FIFO** | ✅ Completo | SendMessage, ReceiveMessage, DeleteMessage, SendMessageBatch, DeleteMessageBatch, Deduplicação |
 | **SQS Standard** | ✅ Completo | Sem throttling (ilimitado) |
 | **DynamoDB** | ⚠️ Parcial | PutItem, GetItem (em desenvolvimento) |
 
 ---
 
 ### SQS FIFO - Quotas Implementadas
+
+#### Rate Limiting (Throttling)
 
 | Operação | Limite Padrão (AWS) | Configurável | Variável de Ambiente |
 |----------|---------------------|--------------|---------------------|
@@ -31,6 +33,23 @@ Quando você desenvolve localmente com Floci ou LocalStack, os serviços funcion
 | DeleteMessage | 300 TPS | ✅ | `QUOTA_SQS_FIFO_DELETE_TPS` |
 | SendMessageBatch | 3,000 TPS | ✅ | `QUOTA_SQS_FIFO_BATCH_TPS` |
 | DeleteMessageBatch | 3,000 TPS | ✅ | `QUOTA_SQS_FIFO_BATCH_TPS` |
+
+#### Deduplicação de Mensagens
+
+| Cenário | Comportamento | Status |
+|---------|---------------|--------|
+| `MessageDeduplicationId` fornecido | Verifica cache, rejeita duplicados | ✅ |
+| `ContentBasedDeduplication=true` | Calcula SHA-256 do MessageBody | ✅ |
+| Sem ambos | Não faz deduplicação | ✅ |
+| TTL do cache | 5 minutos (padrão AWS) | ✅ |
+
+**Erro retornado em duplicação:**
+```json
+{
+  "__type": "com.amazonaws.sqs#DuplicateMessage",
+  "message": "The message with specified message deduplication ID has already been received."
+}
+```
 
 ### DynamoDB - Quotas (Em Desenvolvimento)
 
@@ -50,10 +69,17 @@ Quando você desenvolve localmente com Floci ou LocalStack, os serviços funcion
 │  Sua App   │ ──► │ Quota Simulator    │ ──► │  Floci   │
 │  (SDK AWS) │     │   (localhost:4567)  │     │ (:4566)  │
 └─────────────┘     └─────────────────────┘     └──────────┘
-                        ↓
-              Verifica quotas e retorna
-              erros de throttling se excedido
+                         ↓
+              ┌────────────────────┐
+              │   Rate Limiter     │
+              │  (Token Bucket)    │
+              ├────────────────────┤
+              │  Dedup Cache       │
+              │  (TTL 5 min)      │
+              └────────────────────┘
 ```
+
+---
 
 ## Quick Start
 
@@ -133,12 +159,14 @@ aws --endpoint-url=http://localhost:4567 sqs create-queue \
     --queue-name=test-queue.fifo \
     --attributes='{"FifoQueue":"true"}'
 
-# Enviar mensagem (注意: FIFO tem limite de 300 TPS!)
+# Enviar mensagem (Cuidado: FIFO tem limite de 300 TPS!)
 aws --endpoint-url=http://localhost:4567 sqs send-message \
     --queue-url=http://localhost:4567/000000000000/test-queue.fifo \
     --message-body="Hello World" \
     --message-group-id="group-1"
 ```
+
+---
 
 ## Configuração
 
@@ -153,8 +181,13 @@ sqs:
     burst_limit: 100000
   fifo:
     tps_limit: 300        # Limite por ação (send/receive/delete)
+    receive_tps_limit: 300
+    delete_tps_limit: 300
     burst_limit: 300
     batch_tps_limit: 3000 # Com batching (ate 10 msgs por chamada)
+  dedup:
+    ttl_minutes: 5                    # TTL do cache de deduplicação
+    attributes_cache_ttl_minutes: 5   # Cache de atributos da fila
 
 dynamodb:
   on_demand:
@@ -179,8 +212,11 @@ proxy:
 
 | Variável | Descrição | Padrão |
 |----------|-----------|--------|
-| `QUOTA_SQS_FIFO_TPS` | TPS limite para FIFO | 300 |
+| `QUOTA_SQS_FIFO_TPS` | TPS limite para SendMessage | 300 |
+| `QUOTA_SQS_FIFO_RECEIVE_TPS` | TPS limite para ReceiveMessage | 300 |
+| `QUOTA_SQS_FIFO_DELETE_TPS` | TPS limite para DeleteMessage | 300 |
 | `QUOTA_SQS_FIFO_BATCH_TPS` | TPS com batching | 3000 |
+| `SQS_DEDUP_TTL_MINUTES` | TTL do cache de deduplicação | 5 |
 | `QUOTA_DYNAMODB_ONDEMAND_MAX_RPS` | RPS max DynamoDB | 40000 |
 | `PROXY_PORT` | Porta do proxy | 4567 |
 | `UPSTREAM_URL` | URL do Floci | http://localhost:4566 |
@@ -193,14 +229,15 @@ Exemplo docker-compose:
 quota-simulator:
   environment:
     - QUOTA_SQS_FIFO_TPS=300
+    - SQS_DEDUP_TTL_MINUTES=5
     - QUOTA_DYNAMODB_ONDEMAND_MAX_RPS=40000
 ```
+
+---
 
 ## Simulando Throttling
 
 ### SQS FIFO - Exemplo de teste
-
-Crie um script de teste para verificar o throttling:
 
 ```go
 package main
@@ -232,7 +269,6 @@ func main() {
     queueURL := "http://localhost:4567/000000000000/test-queue.fifo"
 
     var count int
-    var lastTPS time.Time
     tpsCounter := 0
 
     ticker := time.NewTicker(1 * time.Second)
@@ -270,9 +306,52 @@ Quando exceder 300 TPS, você verá erros como:
 Throttling detected: RequestThrottled: Rate limit exceeded for queue
 ```
 
-### DynamoDB
+---
 
-Da mesma forma, limites são aplicados para operações de leitura/escrita. O SDK automaticamente faz retry com backoff exponencial.
+## Simulando Deduplicação
+
+### Exemplo com MessageDeduplicationId explícito
+
+```go
+// Primeira mensagem - será aceita
+_, err := client.SendMessage(ctx, &sqs.SendMessageInput{
+    QueueUrl:               aws.String(queueURL),
+    MessageBody:            aws.String("Important message"),
+    MessageGroupId:         aws.String("group-1"),
+    MessageDeduplicationId: aws.String("my-unique-id-123"),
+})
+
+// Segunda mensagem com mesmo ID - será REJEITADA
+_, err = client.SendMessage(ctx, &sqs.SendMessageInput{
+    QueueUrl:               aws.String(queueURL),
+    MessageBody:            aws.String("Important message"),
+    MessageGroupId:         aws.String("group-1"),
+    MessageDeduplicationId: aws.String("my-unique-id-123"),
+})
+// Error: DuplicateMessage
+```
+
+### Exemplo com ContentBasedDeduplication
+
+Quando a fila tem `ContentBasedDeduplication=true`, o mesmo body é automaticamente rejeitado:
+
+```python
+# Primeira mensagem - aceita
+sqs.send_message(
+    QueueUrl=queue_url,
+    MessageBody='Same content',
+    MessageGroupId='group-1'
+)
+
+# Segunda mensagem com mesmo body - REJEITADA (erro DuplicateMessage)
+sqs.send_message(
+    QueueUrl=queue_url,
+    MessageBody='Same content',
+    MessageGroupId='group-1'
+)
+```
+
+---
 
 ## Erros Retornados
 
@@ -288,6 +367,16 @@ HTTP/1.1 400 Bad Request
 }
 ```
 
+**SQS DuplicateMessage:**
+```json
+HTTP/1.1 400 Bad Request
+{
+  "__type": "com.amazonaws.sqs#DuplicateMessage",
+  "message": "The message with specified message deduplication ID has already been received. Queue URL: http://localhost:4567/000000000000/test.fifo",
+  "retryable": false
+}
+```
+
 **DynamoDB Throttling:**
 ```json
 HTTP/1.1 400 Bad Request
@@ -299,6 +388,8 @@ HTTP/1.1 400 Bad Request
 ```
 
 O SDK da AWS trata esses erros automaticamente com retry.
+
+---
 
 ## Desenvolvimento
 
@@ -313,7 +404,7 @@ go build -o quota-simulator ./cmd/server/main.go
 ./quota-simulator
 
 # Ou com variáveis customizadas
-QUOTA_SQS_FIFO_TPS=100 UPSTREAM_URL=http://localhost:4566 ./quota-simulator
+QUOTA_SQS_FIFO_TPS=100 SQS_DEDUP_TTL_MINUTES=10 ./quota-simulator
 ```
 
 ### Testes
@@ -337,14 +428,17 @@ SKIP_INTEGRATION=1 go test ./...
 
 #### Testes de Integração com Testcontainers
 
-O projeto inclui testes de integração que usam testcontainers para validar o comportamento de throttling:
+O projeto inclui testes de integração que usam testcontainers para validar o comportamento de throttling e deduplicação:
 
 ```bash
-# Rodar apenas testes de integração (requer Docker)
-go test -v ./internal/quota/services/... -run "Integration"
+# Rodar todos os testes de integração
+go test -v ./internal/quota/services/...
 
-# Ver logs dos containers durante os testes
-go test -v -count=1 ./internal/quota/services/... -run "TestSQSFIFO"
+# Rodar apenas testes de deduplicação
+go test -v ./internal/quota/services/... -run "Dedup"
+
+# Rodar apenas testes de throttling
+go test -v ./internal/quota/services/... -run "Throttl"
 ```
 
 **Casos de teste disponíveis:**
@@ -355,6 +449,10 @@ go test -v -count=1 ./internal/quota/services/... -run "TestSQSFIFO"
 | `TestFIFOThrottling` | Valida throttling em SendMessage (FIFO) |
 | `TestFIFOReceiveThrottling` | Valida throttling em ReceiveMessage (FIFO) |
 | `TestFIFODeleteThrottling` | Valida throttling em DeleteMessageBatch (FIFO) |
+| `TestFIFODedupWithMessageDeduplicationId` | Valida deduplicação com ID explícito |
+| `TestFIFODedupWithContentBasedDeduplication` | Valida deduplicação baseada em hash do body |
+| `TestFIFONoDedupWithoutContentBasedDeduplication` | Valida que sem config não há dedup |
+| `TestFIFODedupDifferentGroups` | Valida que mesmo ID em grupos diferentes é permitido |
 
 **Configuração de quotas para testes:**
 
@@ -365,6 +463,8 @@ Os testes de integração usam quotas reduzidas para permitir validação rápid
 - `QUOTA_SQS_FIFO_BATCH_TPS=5` (em vez de 3000)
 
 Isso permite testar throttling em poucos segundos ao invés de precisar atingir 300+ TPS.
+
+---
 
 ### Adicionar novo serviço
 
@@ -385,6 +485,8 @@ type QuotaService interface {
 m.RegisterService("novoservico", services.NewNovoServicoService(cfg))
 ```
 
+---
+
 ## Troubleshooting
 
 **Throttling não funciona:**
@@ -398,12 +500,20 @@ m.RegisterService("novoservico", services.NewNovoServicoService(cfg))
 - Verifique se o Floci está rodando: `docker ps`
 - Verifique logs: `docker logs floci`
 
+**Deduplicação não funciona:**
+- Verifique se a fila é FIFO (.fifo no nome)
+- Verifique se `MessageDeduplicationId` está sendo enviado
+- Ou se a fila tem `ContentBasedDeduplication=true`
+
+---
+
 ## Tech Stack
 
 - **Go 1.21** - Linguagem
 - **Token Bucket** - Rate limiting algorithm
 - **httputil.ReverseProxy** - Proxy HTTP
 - **Docker** - Containerização
+- **Testcontainers** - Testes de integração
 
 ## Licença
 

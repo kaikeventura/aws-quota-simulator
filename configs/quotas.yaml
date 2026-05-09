@@ -9,6 +9,9 @@ sqs:
     burst_limit: 300
     batch_tps_limit: 3000    # SendMessageBatch / DeleteMessageBatch
   default_queue_limit: 1000
+  dedup:
+    ttl_minutes: 5                    # 5 min = padrão AWS
+    attributes_cache_ttl_minutes: 5   # Cache de atributos da fila
 
 dynamodb:
   on_demand:

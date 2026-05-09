@@ -1,6 +1,8 @@
 package services
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 
@@ -54,6 +56,29 @@ func (s *SQSService) ParseQueueURL(body []byte) string {
 		return ""
 	}
 	return req.QueueUrl
+}
+
+func (s *SQSService) ParseMessageDeduplicationID(body []byte) string {
+	var req struct {
+		MessageDeduplicationId string `json:"MessageDeduplicationId,omitempty"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return ""
+	}
+	return req.MessageDeduplicationId
+}
+
+func (s *SQSService) CalculateContentBasedDedupID(body []byte) string {
+	var req struct {
+		MessageBody string `json:"MessageBody,omitempty"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		hash := sha256.Sum256(body)
+		return hex.EncodeToString(hash[:])
+	}
+
+	hash := sha256.Sum256([]byte(req.MessageBody))
+	return hex.EncodeToString(hash[:])
 }
 
 func (s *SQSService) DetectOperation(path, body string) (operation, resource string) {

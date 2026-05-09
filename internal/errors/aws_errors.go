@@ -19,6 +19,7 @@ func NewAWSError(code, message string, retryable bool) *AWSError {
 		"ProvisionedThroughputExceededException": "com.amazonaws.dynamodb.v#ProvisionedThroughputExceededException",
 		"ThrottlingException":                 "com.amazonaws.sdk.v1#ThrottlingException",
 		"LimitExceededException":              "com.amazonaws.dynamodb.v#LimitExceededException",
+		"DuplicateMessage":                    "com.amazonaws.sqs#DuplicateMessage",
 	}
 
 	prefix, ok := typePrefix[code]
@@ -70,6 +71,16 @@ func SendThrottlingError(w http.ResponseWriter, service, message string) {
 
 func SendLimitExceededError(w http.ResponseWriter, service, message string) {
 	awsErr := NewAWSError("LimitExceededException", message, false)
+
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	w.Header().Set("x-amzn-RequestId", generateRequestID())
+	w.WriteHeader(http.StatusBadRequest)
+	w.Write(awsErr.ToJSON())
+}
+
+func SendDuplicateMessageError(w http.ResponseWriter, queueURL string) {
+	message := fmt.Sprintf("The message with specified message deduplication ID has already been received. Queue URL: %s", queueURL)
+	awsErr := NewAWSError("DuplicateMessage", message, false)
 
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.Header().Set("x-amzn-RequestId", generateRequestID())

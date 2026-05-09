@@ -450,3 +450,187 @@ func TestFIFODeleteThrottling(t *testing.T) {
 
 	require.True(t, throttled, "Expected delete batch throttling with TPS=%d", batchQueueTPS)
 }
+
+func isDuplicateError(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "DuplicateMessage") || strings.Contains(err.Error(), "duplicate"))
+}
+
+func TestFIFODedupWithMessageDeduplicationId(t *testing.T) {
+	if os.Getenv("SKIP_INTEGRATION") == "1" {
+		t.Skip("Skipping integration test")
+	}
+
+	_, port, cleanup := setupTestContainers(t)
+	defer cleanup()
+
+	client := createSQSClient(port)
+
+	queueName := fmt.Sprintf("dedup-test-%d.fifo", time.Now().UnixNano())
+	resp, err := client.CreateQueue(context.Background(), &sqs.CreateQueueInput{
+		QueueName: aws.String(queueName),
+		Attributes: map[string]string{
+			"FifoQueue":                "true",
+			"ContentBasedDeduplication": "false",
+		},
+	})
+	require.NoError(t, err, "Failed to create FIFO queue")
+
+	fifoName := strings.Split(*resp.QueueUrl, "/")[len(strings.Split(*resp.QueueUrl, "/"))-1]
+	queueURL := fmt.Sprintf("http://localhost:%d/000000000000/%s", port, fifoName)
+
+	t.Logf("Queue URL: %s", queueURL)
+
+	dedupID := "my-unique-dedup-id-12345"
+
+	_, err = client.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:               aws.String(queueURL),
+		MessageBody:            aws.String("First message"),
+		MessageGroupId:         aws.String("group1"),
+		MessageDeduplicationId: aws.String(dedupID),
+	})
+	require.NoError(t, err, "First send should succeed")
+
+	_, err = client.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:               aws.String(queueURL),
+		MessageBody:            aws.String("Duplicate message"),
+		MessageGroupId:         aws.String("group1"),
+		MessageDeduplicationId: aws.String(dedupID),
+	})
+
+	require.Error(t, err, "Second send with same dedup ID should fail")
+	require.True(t, isDuplicateError(err), "Should return duplicate message error, got: %v", err)
+
+	t.Log("SUCCESS: DuplicateMessage error returned for duplicate dedup ID")
+}
+
+func TestFIFODedupWithContentBasedDeduplication(t *testing.T) {
+	if os.Getenv("SKIP_INTEGRATION") == "1" {
+		t.Skip("Skipping integration test")
+	}
+
+	_, port, cleanup := setupTestContainers(t)
+	defer cleanup()
+
+	client := createSQSClient(port)
+
+	queueName := fmt.Sprintf("content-dedup-%d.fifo", time.Now().UnixNano())
+	resp, err := client.CreateQueue(context.Background(), &sqs.CreateQueueInput{
+		QueueName: aws.String(queueName),
+		Attributes: map[string]string{
+			"FifoQueue":                "true",
+			"ContentBasedDeduplication": "true",
+		},
+	})
+	require.NoError(t, err, "Failed to create FIFO queue with ContentBasedDeduplication")
+
+	fifoName := strings.Split(*resp.QueueUrl, "/")[len(strings.Split(*resp.QueueUrl, "/"))-1]
+	queueURL := fmt.Sprintf("http://localhost:%d/000000000000/%s", port, fifoName)
+
+	t.Logf("Queue URL: %s", queueURL)
+
+	_, err = client.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:       aws.String(queueURL),
+		MessageBody:    aws.String("Same body content"),
+		MessageGroupId: aws.String("group1"),
+	})
+	require.NoError(t, err, "First send should succeed")
+
+	_, err = client.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:       aws.String(queueURL),
+		MessageBody:    aws.String("Same body content"),
+		MessageGroupId: aws.String("group1"),
+	})
+
+	require.Error(t, err, "Second send with same body should fail with content-based dedup")
+	require.True(t, isDuplicateError(err), "Should return duplicate message error for same body, got: %v", err)
+
+	t.Log("SUCCESS: DuplicateMessage error returned for content-based deduplication")
+}
+
+func TestFIFONoDedupWithoutContentBasedDeduplication(t *testing.T) {
+	if os.Getenv("SKIP_INTEGRATION") == "1" {
+		t.Skip("Skipping integration test")
+	}
+
+	_, port, cleanup := setupTestContainers(t)
+	defer cleanup()
+
+	client := createSQSClient(port)
+
+	queueName := fmt.Sprintf("no-dedup-%d.fifo", time.Now().UnixNano())
+	resp, err := client.CreateQueue(context.Background(), &sqs.CreateQueueInput{
+		QueueName: aws.String(queueName),
+		Attributes: map[string]string{
+			"FifoQueue":                "true",
+			"ContentBasedDeduplication": "false",
+		},
+	})
+	require.NoError(t, err, "Failed to create FIFO queue")
+
+	fifoName := strings.Split(*resp.QueueUrl, "/")[len(strings.Split(*resp.QueueUrl, "/"))-1]
+	queueURL := fmt.Sprintf("http://localhost:%d/000000000000/%s", port, fifoName)
+
+	t.Logf("Queue URL: %s", queueURL)
+
+	_, err = client.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:       aws.String(queueURL),
+		MessageBody:    aws.String("Same body without dedup ID"),
+		MessageGroupId: aws.String("group1"),
+	})
+	require.NoError(t, err, "First send should succeed")
+
+	_, err = client.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:       aws.String(queueURL),
+		MessageBody:    aws.String("Same body without dedup ID"),
+		MessageGroupId: aws.String("group1"),
+	})
+
+	require.NoError(t, err, "Without MessageDeduplicationId and ContentBasedDeduplication=false, same body should be allowed")
+	t.Log("SUCCESS: Same body allowed when no deduplication is configured")
+}
+
+func TestFIFODedupDifferentGroups(t *testing.T) {
+	if os.Getenv("SKIP_INTEGRATION") == "1" {
+		t.Skip("Skipping integration test")
+	}
+
+	_, port, cleanup := setupTestContainers(t)
+	defer cleanup()
+
+	client := createSQSClient(port)
+
+	queueName := fmt.Sprintf("groups-dedup-%d.fifo", time.Now().UnixNano())
+	resp, err := client.CreateQueue(context.Background(), &sqs.CreateQueueInput{
+		QueueName: aws.String(queueName),
+		Attributes: map[string]string{
+			"FifoQueue":                "true",
+			"ContentBasedDeduplication": "false",
+		},
+	})
+	require.NoError(t, err, "Failed to create FIFO queue")
+
+	fifoName := strings.Split(*resp.QueueUrl, "/")[len(strings.Split(*resp.QueueUrl, "/"))-1]
+	queueURL := fmt.Sprintf("http://localhost:%d/000000000000/%s", port, fifoName)
+
+	t.Logf("Queue URL: %s", queueURL)
+
+	dedupID := "shared-dedup-id"
+
+	_, err = client.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:               aws.String(queueURL),
+		MessageBody:            aws.String("Message in group 1"),
+		MessageGroupId:         aws.String("group1"),
+		MessageDeduplicationId: aws.String(dedupID),
+	})
+	require.NoError(t, err, "First send should succeed")
+
+	_, err = client.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:               aws.String(queueURL),
+		MessageBody:            aws.String("Message in group 2"),
+		MessageGroupId:         aws.String("group2"),
+		MessageDeduplicationId: aws.String(dedupID),
+	})
+
+	require.NoError(t, err, "Same dedup ID in different groups should be allowed")
+	t.Log("SUCCESS: Same dedup ID allowed in different message groups")
+}
