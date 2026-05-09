@@ -118,7 +118,10 @@ func TestSQSService_ShouldThrottle(t *testing.T) {
 				BatchTPSLimit: 3000,
 			},
 			Standard: config.StandardQueueConfig{
-				RateLimit: 100000,
+				SendTPSLimit:     100000,
+				ReceiveTPSLimit:  100000,
+				DeleteTPSLimit:   100000,
+				BatchTPSLimit:    100000,
 			},
 		},
 	}
@@ -133,11 +136,35 @@ func TestSQSService_ShouldThrottle(t *testing.T) {
 		expectedTPS int64
 	}{
 		{
-			"Standard queue - no throttle",
+			"Standard queue - send throttle",
 			"send",
 			false,
 			false,
+			true,
+			100000,
+		},
+		{
+			"Standard queue - receive throttle",
+			"receive",
 			false,
+			false,
+			true,
+			100000,
+		},
+		{
+			"Standard queue - delete throttle",
+			"delete",
+			false,
+			false,
+			true,
+			100000,
+		},
+		{
+			"Standard queue - batch throttle",
+			"send_batch",
+			false,
+			true,
+			true,
 			100000,
 		},
 		{
@@ -233,6 +260,79 @@ func TestSQSService_DetectOperationFromAction(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			operation, _ := svc.DetectOperationFromAction(tt.action, tt.body)
 			assert.Equal(t, tt.expectedOp, operation)
+		})
+	}
+}
+
+func TestSQSService_GetMessageSize(t *testing.T) {
+	cfg := &config.Config{}
+	svc := NewSQSService(cfg)
+
+	tests := []struct {
+		name       string
+		body       string
+		expectedSize int64
+	}{
+		{
+			"Small message",
+			`{"MessageBody":"hello"}`,
+			5,
+		},
+		{
+			"Empty message",
+			`{"MessageBody":""}`,
+			0,
+		},
+		{
+			"Invalid JSON returns body length",
+			`{invalid`,
+			7,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			size := svc.GetMessageSize([]byte(tt.body))
+			assert.Equal(t, tt.expectedSize, size)
+		})
+	}
+}
+
+func TestSQSService_GetBatchEntryCount(t *testing.T) {
+	cfg := &config.Config{}
+	svc := NewSQSService(cfg)
+
+	tests := []struct {
+		name       string
+		body       string
+		expectedCount int
+	}{
+		{
+			"Single entry",
+			`{"QueueUrl":"http://localhost:4566/queue","Entries":[{"Id":"1"}]}`,
+			1,
+		},
+		{
+			"Multiple entries",
+			`{"QueueUrl":"http://localhost:4566/queue","Entries":[{"Id":"1"},{"Id":"2"},{"Id":"3"}]}`,
+			3,
+		},
+		{
+			"Empty entries",
+			`{"QueueUrl":"http://localhost:4566/queue","Entries":[]}`,
+			0,
+		},
+		{
+			"Invalid JSON",
+			`{invalid`,
+			0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			count := svc.GetBatchEntryCount([]byte(tt.body))
+			assert.Equal(t, tt.expectedCount, count)
 		})
 	}
 }

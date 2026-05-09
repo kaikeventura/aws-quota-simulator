@@ -58,6 +58,24 @@ func (s *SQSService) ParseQueueURL(body []byte) string {
 	return req.QueueUrl
 }
 
+func (s *SQSService) GetMessageSize(body []byte) int64 {
+	var req struct {
+		MessageBody string `json:"MessageBody,omitempty"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return int64(len(body))
+	}
+	return int64(len(req.MessageBody))
+}
+
+func (s *SQSService) GetBatchEntryCount(body []byte) int {
+	var req SQSBatchRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return 0
+	}
+	return len(req.Entries)
+}
+
 func (s *SQSService) ParseMessageDeduplicationID(body []byte) string {
 	var req struct {
 		MessageDeduplicationId string `json:"MessageDeduplicationId,omitempty"`
@@ -140,19 +158,30 @@ func (s *SQSService) DetectOperationFromAction(action, body string) (operation, 
 }
 
 func (s *SQSService) ShouldThrottle(operation string, isFIFO, isBatch bool) (shouldThrottle bool, tpsLimit int64) {
-	if !isFIFO {
-		return false, s.cfg.SQS.Standard.RateLimit
+	if isFIFO {
+		switch operation {
+		case "send":
+			return true, s.cfg.SQS.FIFO.TPSLimit
+		case "receive":
+			return true, s.cfg.SQS.FIFO.ReceiveTPSLimit
+		case "delete":
+			return true, s.cfg.SQS.FIFO.DeleteTPSLimit
+		case "send_batch", "delete_batch":
+			return true, s.cfg.SQS.FIFO.BatchTPSLimit
+		default:
+			return false, 0
+		}
 	}
 
 	switch operation {
 	case "send":
-		return true, s.cfg.SQS.FIFO.TPSLimit
+		return true, s.cfg.SQS.Standard.SendTPSLimit
 	case "receive":
-		return true, s.cfg.SQS.FIFO.ReceiveTPSLimit
+		return true, s.cfg.SQS.Standard.ReceiveTPSLimit
 	case "delete":
-		return true, s.cfg.SQS.FIFO.DeleteTPSLimit
+		return true, s.cfg.SQS.Standard.DeleteTPSLimit
 	case "send_batch", "delete_batch":
-		return true, s.cfg.SQS.FIFO.BatchTPSLimit
+		return true, s.cfg.SQS.Standard.BatchTPSLimit
 	default:
 		return false, 0
 	}

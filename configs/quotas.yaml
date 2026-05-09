@@ -1,7 +1,12 @@
 sqs:
   standard:
-    rate_limit: 100000  # Nearly unlimited, but we cap it
-    burst_limit: 100000
+    rate_limit: 100000        # Default value (legacy)
+    burst_limit: 100000      # Default value (legacy)
+    send_tps_limit: 100000   # SendMessage TPS
+    receive_tps_limit: 100000 # ReceiveMessage TPS
+    delete_tps_limit: 100000  # DeleteMessage TPS
+    batch_tps_limit: 100000   # SendMessageBatch / DeleteMessageBatch
+    max_inflight_messages: 120000  # AWS default limit - Standard only
   fifo:
     tps_limit: 300           # SendMessage TPS
     receive_tps_limit: 300   # ReceiveMessage TPS
@@ -9,6 +14,8 @@ sqs:
     burst_limit: 300
     batch_tps_limit: 3000    # SendMessageBatch / DeleteMessageBatch
   default_queue_limit: 1000
+  max_message_size: 262144      # 256 KB - Apply to both FIFO and Standard
+  max_batch_size: 10            # Max messages per batch - Apply to both FIFO and Standard
   dedup:
     ttl_minutes: 5                    # 5 min = padrão AWS
     attributes_cache_ttl_minutes: 5   # Cache de atributos da fila

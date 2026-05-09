@@ -172,6 +172,24 @@ func (h *ProxyHandler) checkSQSQuota(path, query, action string, body []byte) (b
 
 	log.Printf("[DEBUG] SQS - parsed queue: '%s', isFIFO: %v, isBatch: %v", queueURL, isFIFO, isBatch)
 
+	if operation == "send" {
+		msgSize := sqsSvc.GetMessageSize(body)
+		allowed, msg := h.quotaManager.CheckMessageSize(msgSize)
+		if !allowed {
+			log.Printf("[DEBUG] Message size validation failed: %s", msg)
+			return false, msg
+		}
+	}
+
+	if isBatch {
+		entryCount := sqsSvc.GetBatchEntryCount(body)
+		allowed, msg := h.quotaManager.CheckBatchSize(entryCount)
+		if !allowed {
+			log.Printf("[DEBUG] Batch size validation failed: %s", msg)
+			return false, msg
+		}
+	}
+
 	shouldThrottle, tpsLimit := sqsSvc.ShouldThrottle(operation, isFIFO, isBatch)
 	if !shouldThrottle {
 		return true, ""

@@ -15,10 +15,12 @@ type Config struct {
 }
 
 type SQSConfig struct {
-	Standard StandardQueueConfig `yaml:"standard"`
-	FIFO     FIFOQueueConfig     `yaml:"fifo"`
-	DefaultQueueLimit int64    `yaml:"default_queue_limit"`
-	Dedup    DedupConfig       `yaml:"dedup"`
+	Standard        StandardQueueConfig `yaml:"standard"`
+	FIFO            FIFOQueueConfig     `yaml:"fifo"`
+	DefaultQueueLimit int64             `yaml:"default_queue_limit"`
+	Dedup           DedupConfig         `yaml:"dedup"`
+	MaxMessageSize  int64               `yaml:"max_message_size"`
+	MaxBatchSize    int64               `yaml:"max_batch_size"`
 }
 
 type DedupConfig struct {
@@ -27,8 +29,15 @@ type DedupConfig struct {
 }
 
 type StandardQueueConfig struct {
-	RateLimit int64 `yaml:"rate_limit"`
-	BurstLimit int64 `yaml:"burst_limit"`
+	RateLimit          int64 `yaml:"rate_limit"`
+	BurstLimit         int64 `yaml:"burst_limit"`
+	SendTPSLimit       int64 `yaml:"send_tps_limit"`
+	ReceiveTPSLimit    int64 `yaml:"receive_tps_limit"`
+	DeleteTPSLimit     int64 `yaml:"delete_tps_limit"`
+	BatchTPSLimit      int64 `yaml:"batch_tps_limit"`
+	MaxInflightMessages int64 `yaml:"max_inflight_messages"`
+	MaxMessageSize     int64 `yaml:"max_message_size"`
+	MaxBatchSize       int64 `yaml:"max_batch_size"`
 }
 
 type FIFOQueueConfig struct {
@@ -102,6 +111,15 @@ func setDefaults(cfg *Config) {
 	if cfg.SQS.Dedup.AttributesCacheTTLMin <= 0 {
 		cfg.SQS.Dedup.AttributesCacheTTLMin = 5
 	}
+	if cfg.SQS.Standard.MaxInflightMessages <= 0 {
+		cfg.SQS.Standard.MaxInflightMessages = 120000
+	}
+	if cfg.SQS.MaxMessageSize <= 0 {
+		cfg.SQS.MaxMessageSize = 262144
+	}
+	if cfg.SQS.MaxBatchSize <= 0 {
+		cfg.SQS.MaxBatchSize = 10
+	}
 }
 
 func applyEnvOverrides(cfg *Config) {
@@ -123,6 +141,41 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("QUOTA_SQS_FIFO_BATCH_TPS"); v != "" {
 		if val := parseInt64(v); val > 0 {
 			cfg.SQS.FIFO.BatchTPSLimit = val
+		}
+	}
+	if v := os.Getenv("QUOTA_SQS_STANDARD_SEND_TPS"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.SQS.Standard.SendTPSLimit = val
+		}
+	}
+	if v := os.Getenv("QUOTA_SQS_STANDARD_RECEIVE_TPS"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.SQS.Standard.ReceiveTPSLimit = val
+		}
+	}
+	if v := os.Getenv("QUOTA_SQS_STANDARD_DELETE_TPS"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.SQS.Standard.DeleteTPSLimit = val
+		}
+	}
+	if v := os.Getenv("QUOTA_SQS_STANDARD_BATCH_TPS"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.SQS.Standard.BatchTPSLimit = val
+		}
+	}
+	if v := os.Getenv("QUOTA_SQS_STANDARD_MAX_INFLIGHT"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.SQS.Standard.MaxInflightMessages = val
+		}
+	}
+	if v := os.Getenv("QUOTA_SQS_MAX_MESSAGE_SIZE"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.SQS.MaxMessageSize = val
+		}
+	}
+	if v := os.Getenv("QUOTA_SQS_MAX_BATCH_SIZE"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.SQS.MaxBatchSize = val
 		}
 	}
 	if v := os.Getenv("QUOTA_DYNAMODB_ONDEMAND_MAX_RPS"); v != "" {

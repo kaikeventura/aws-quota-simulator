@@ -16,8 +16,8 @@ Quando você desenvolve localmente com Floci ou LocalStack, os serviços funcion
 
 | Serviço | Status | Operações Suportadas |
 |---------|--------|---------------------|
-| **SQS FIFO** | ✅ Completo | SendMessage, ReceiveMessage, DeleteMessage, SendMessageBatch, DeleteMessageBatch, Deduplicação |
-| **SQS Standard** | ✅ Completo | Sem throttling (ilimitado) |
+| **SQS FIFO** | ✅ Completo | SendMessage, ReceiveMessage, DeleteMessage, SendMessageBatch, DeleteMessageBatch, Deduplicação, Throttling |
+| **SQS Standard** | ✅ Completo | Throttling, Message Size, Batch Size, Inflight Messages |
 | **DynamoDB** | ⚠️ Parcial | PutItem, GetItem (em desenvolvimento) |
 
 ---
@@ -34,6 +34,13 @@ Quando você desenvolve localmente com Floci ou LocalStack, os serviços funcion
 | SendMessageBatch | 3,000 TPS | ✅ | `QUOTA_SQS_FIFO_BATCH_TPS` |
 | DeleteMessageBatch | 3,000 TPS | ✅ | `QUOTA_SQS_FIFO_BATCH_TPS` |
 
+#### Limites de Mensagem (comuns a FIFO e Standard)
+
+| Limite | Valor Padrão | Descrição |
+|--------|--------------|------------|
+| Message Size Max | 256 KB | Aplica a ambas filas |
+| Batch Size Max | 10 msgs/call | Aplica a ambas filas |
+
 #### Deduplicação de Mensagens
 
 | Cenário | Comportamento | Status |
@@ -48,6 +55,42 @@ Quando você desenvolve localmente com Floci ou LocalStack, os serviços funcion
 {
   "__type": "com.amazonaws.sqs#DuplicateMessage",
   "message": "The message with specified message deduplication ID has already been received."
+}
+```
+
+### SQS Standard - Quotas Implementadas
+
+#### Rate Limiting (Throttling)
+
+| Operação | Limite Padrão (Configurável) | Variável de Ambiente |
+|----------|------------------------------|---------------------|
+| SendMessage | 100,000 TPS | `QUOTA_SQS_STANDARD_SEND_TPS` |
+| ReceiveMessage | 100,000 TPS | `QUOTA_SQS_STANDARD_RECEIVE_TPS` |
+| DeleteMessage | 100,000 TPS | `QUOTA_SQS_STANDARD_DELETE_TPS` |
+| SendMessageBatch | 100,000 TPS | `QUOTA_SQS_STANDARD_BATCH_TPS` |
+| DeleteMessageBatch | 100,000 TPS | `QUOTA_SQS_STANDARD_BATCH_TPS` |
+
+#### Limites de Mensagem (FIFO e Standard)
+
+| Limite | Valor Padrão | Aplica a | Variável de Ambiente |
+|--------|--------------|----------|---------------------|
+| Message Size Max | 256 KB | Ambos | `QUOTA_SQS_MAX_MESSAGE_SIZE` |
+| Batch Size Max | 10 msgs/call | Ambos | `QUOTA_SQS_MAX_BATCH_SIZE` |
+| Inflight Messages | 120,000/fila | Standard | `QUOTA_SQS_STANDARD_MAX_INFLIGHT` |
+
+**Erro retornado quando excede tamanho máximo:**
+```json
+{
+  "__type": "com.amazonaws.sqs.v#RequestThrottled",
+  "message": "Message size X exceeds maximum allowed size Y"
+}
+```
+
+**Erro retornado quando excede batch size:**
+```json
+{
+  "__type": "com.amazonaws.sqs.v#RequestThrottled",
+  "message": "Batch contains X entries, maximum allowed is 10"
 }
 ```
 
@@ -177,14 +220,21 @@ Edite `configs/quotas.yaml`:
 ```yaml
 sqs:
   standard:
-    rate_limit: 100000   # TPS para filas padrão
-    burst_limit: 100000
+    rate_limit: 100000           # Valor legacy (não usado)
+    burst_limit: 100000         # Valor legacy (não usado)
+    send_tps_limit: 100000      # TPS para SendMessage
+    receive_tps_limit: 100000   # TPS para ReceiveMessage
+    delete_tps_limit: 100000     # TPS para DeleteMessage
+    batch_tps_limit: 100000     # TPS para SendMessageBatch/DeleteMessageBatch
+    max_inflight_messages: 120000  # Máximo de mensagens in-flight por fila (Standard)
   fifo:
     tps_limit: 300        # Limite por ação (send/receive/delete)
     receive_tps_limit: 300
     delete_tps_limit: 300
     burst_limit: 300
     batch_tps_limit: 3000 # Com batching (ate 10 msgs por chamada)
+  max_message_size: 262144    # 256 KB - Aplica a FIFO e Standard
+  max_batch_size: 10          # Máximo de mensagens por batch - Aplica a FIFO e Standard
   dedup:
     ttl_minutes: 5                    # TTL do cache de deduplicação
     attributes_cache_ttl_minutes: 5   # Cache de atributos da fila
@@ -210,12 +260,32 @@ proxy:
 
 ### Variáveis de Ambiente
 
+#### SQS FIFO
 | Variável | Descrição | Padrão |
 |----------|-----------|--------|
 | `QUOTA_SQS_FIFO_TPS` | TPS limite para SendMessage | 300 |
 | `QUOTA_SQS_FIFO_RECEIVE_TPS` | TPS limite para ReceiveMessage | 300 |
 | `QUOTA_SQS_FIFO_DELETE_TPS` | TPS limite para DeleteMessage | 300 |
 | `QUOTA_SQS_FIFO_BATCH_TPS` | TPS com batching | 3000 |
+
+#### SQS Standard
+| Variável | Descrição | Padrão |
+|----------|-----------|--------|
+| `QUOTA_SQS_STANDARD_SEND_TPS` | TPS limite para SendMessage | 100000 |
+| `QUOTA_SQS_STANDARD_RECEIVE_TPS` | TPS limite para ReceiveMessage | 100000 |
+| `QUOTA_SQS_STANDARD_DELETE_TPS` | TPS limite para DeleteMessage | 100000 |
+| `QUOTA_SQS_STANDARD_BATCH_TPS` | TPS com batching | 100000 |
+| `QUOTA_SQS_STANDARD_MAX_INFLIGHT` | Máximo de mensagens in-flight (Standard) | 120000 |
+
+#### SQS Comum (FIFO e Standard)
+| Variável | Descrição | Padrão |
+|----------|-----------|--------|
+| `QUOTA_SQS_MAX_MESSAGE_SIZE` | Tamanho máximo da mensagem (bytes) | 262144 (256KB) |
+| `QUOTA_SQS_MAX_BATCH_SIZE` | Máximo de mensagens por batch | 10 |
+
+#### Geral
+| Variável | Descrição | Padrão |
+|----------|-----------|--------|
 | `SQS_DEDUP_TTL_MINUTES` | TTL do cache de deduplicação | 5 |
 | `QUOTA_DYNAMODB_ONDEMAND_MAX_RPS` | RPS max DynamoDB | 40000 |
 | `PROXY_PORT` | Porta do proxy | 4567 |
@@ -445,7 +515,7 @@ go test -v ./internal/quota/services/... -run "Throttl"
 
 | Teste | Descrição |
 |-------|-----------|
-| `TestStandardNoThrottle` | Valida que standard queues não têm throttle |
+| `TestStandardThrottling` | Valida throttling em Standard queues |
 | `TestFIFOThrottling` | Valida throttling em SendMessage (FIFO) |
 | `TestFIFOReceiveThrottling` | Valida throttling em ReceiveMessage (FIFO) |
 | `TestFIFODeleteThrottling` | Valida throttling em DeleteMessageBatch (FIFO) |
@@ -459,8 +529,9 @@ go test -v ./internal/quota/services/... -run "Throttl"
 Os testes de integração usam quotas reduzidas para permitir validação rápida:
 
 - `QUOTA_SQS_FIFO_TPS=5` (em vez de 300)
-- `QUOTA_SQS_FIFO_RECEIVE_TPS=500` (receive não throttleado nos testes)
+- `QUOTA_SQS_FIFO_RECEIVE_TPS=500`
 - `QUOTA_SQS_FIFO_BATCH_TPS=5` (em vez de 3000)
+- `QUOTA_SQS_STANDARD_SEND_TPS=10` (para validar throttling rápido)
 
 Isso permite testar throttling em poucos segundos ao invés de precisar atingir 300+ TPS.
 

@@ -127,6 +127,10 @@ func TestQuotaManager_CheckRateLimit(t *testing.T) {
 				TPSLimit:   300,
 				BurstLimit: 300,
 			},
+			Standard: config.StandardQueueConfig{
+				SendTPSLimit:  100000,
+				BurstLimit:   100000,
+			},
 		},
 	}
 	mgr := NewManager(cfg)
@@ -137,6 +141,78 @@ func TestQuotaManager_CheckRateLimit(t *testing.T) {
 	allowed, msg := mgr.CheckRateLimit("sqs", "test-queue")
 	assert.True(t, allowed, "Should be allowed initially: %s", msg)
 	assert.Empty(t, msg)
+}
+
+func TestQuotaManager_CheckMessageSize(t *testing.T) {
+	cfg := &config.Config{
+		SQS: config.SQSConfig{
+			MaxMessageSize: 262144,
+		},
+	}
+	mgr := NewManager(cfg)
+
+	tests := []struct {
+		name       string
+		size       int64
+		shouldPass bool
+	}{
+		{"Valid size", 5000, true},
+		{"Empty message", 0, true},
+		{"Above maximum", 300000, false},
+		{"At maximum", 262144, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed, _ := mgr.CheckMessageSize(tt.size)
+			assert.Equal(t, tt.shouldPass, allowed)
+		})
+	}
+}
+
+func TestQuotaManager_CheckBatchSize(t *testing.T) {
+	cfg := &config.Config{
+		SQS: config.SQSConfig{
+			MaxBatchSize: 10,
+		},
+	}
+	mgr := NewManager(cfg)
+
+	tests := []struct {
+		name       string
+		size       int
+		shouldPass bool
+	}{
+		{"Valid size", 5, true},
+		{"At max", 10, true},
+		{"Above max", 11, false},
+		{"Empty batch", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed, _ := mgr.CheckBatchSize(tt.size)
+			assert.Equal(t, tt.shouldPass, allowed)
+		})
+	}
+}
+
+func TestQuotaManager_CheckInflightLimit(t *testing.T) {
+	cfg := &config.Config{
+		SQS: config.SQSConfig{
+			Standard: config.StandardQueueConfig{
+				MaxInflightMessages: 100,
+			},
+		},
+	}
+	mgr := NewManager(cfg)
+
+	allowed, msg := mgr.CheckInflightLimit("test-queue", 50)
+	assert.True(t, allowed, "First check should pass, got msg: %s", msg)
+
+	allowed, msg = mgr.CheckInflightLimit("test-queue", 60)
+	assert.False(t, allowed, "Second check should fail, got msg: %s", msg)
+	assert.Contains(t, msg, "in-flight")
 }
 
 type MockQuotaService struct{}

@@ -1,6 +1,8 @@
 package quota
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,12 +105,14 @@ func (rl *ResourceLimiter) GetOrCreate(resource string, rate, burst int64) *Toke
 }
 
 type QuotaManager struct {
-	services    map[string]QuotaService
-	limiters    map[string]*ResourceLimiter
-	limiterMu   sync.RWMutex
-	cfg         *config.Config
-	dedupCache  *DedupCache
-	fifoAttrs   *FIFOAttributesCache
+	services      map[string]QuotaService
+	limiters      map[string]*ResourceLimiter
+	limiterMu     sync.RWMutex
+	cfg           *config.Config
+	dedupCache    *DedupCache
+	fifoAttrs     *FIFOAttributesCache
+	inflightMu    sync.RWMutex
+	inflightCount map[string]int64
 }
 
 func NewQuotaManager(cfg *config.Config) *QuotaManager {
@@ -121,9 +125,10 @@ func NewQuotaManager(cfg *config.Config) *QuotaManager {
 
 func NewManager(cfg *config.Config) *QuotaManager {
 	m := &QuotaManager{
-		services:  make(map[string]QuotaService),
-		limiters:  make(map[string]*ResourceLimiter),
-		cfg:       cfg,
+		services:      make(map[string]QuotaService),
+		limiters:      make(map[string]*ResourceLimiter),
+		cfg:           cfg,
+		inflightCount: make(map[string]int64),
 	}
 
 	m.dedupCache = NewDedupCache(cfg.SQS.Dedup.TTLMinutes)
@@ -176,8 +181,13 @@ func (qm *QuotaManager) GetLimiter(service, resource string) *ResourceLimiter {
 	rate, burst := int64(100), int64(100)
 	switch service {
 	case "sqs":
-		rate = qm.cfg.SQS.FIFO.TPSLimit
-		burst = qm.cfg.SQS.FIFO.BurstLimit
+		if strings.HasSuffix(resource, ".fifo") {
+			rate = qm.cfg.SQS.FIFO.TPSLimit
+			burst = qm.cfg.SQS.FIFO.BurstLimit
+		} else {
+			rate = qm.cfg.SQS.Standard.SendTPSLimit
+			burst = qm.cfg.SQS.Standard.BurstLimit
+		}
 	case "dynamodb":
 		rate = qm.cfg.DynamoDB.OnDemand.MaxTableRPS
 		burst = rate * 2
@@ -217,4 +227,60 @@ func (qm *QuotaManager) IsContentBasedDeduplication(queueURL string) bool {
 
 func (qm *QuotaManager) InvalidateFIFOAttributes(queueURL string) {
 	qm.fifoAttrs.Invalidate(queueURL)
+}
+
+func (qm *QuotaManager) CheckInflightLimit(queueURL string, numMessages int64) (bool, string) {
+	qm.inflightMu.Lock()
+	defer qm.inflightMu.Unlock()
+
+	current := qm.inflightCount[queueURL]
+	limit := qm.cfg.SQS.Standard.MaxInflightMessages
+
+	if current+numMessages > limit {
+		return false, fmt.Sprintf("Too many messages in-flight for queue %s: current=%d, limit=%d", queueURL, current, limit)
+	}
+	qm.inflightCount[queueURL] += numMessages
+	return true, ""
+}
+
+func (qm *QuotaManager) AddInflightMessages(queueURL string, count int64) {
+	qm.inflightMu.Lock()
+	defer qm.inflightMu.Unlock()
+	qm.inflightCount[queueURL] += count
+}
+
+func (qm *QuotaManager) RemoveInflightMessages(queueURL string, count int64) {
+	qm.inflightMu.Lock()
+	defer qm.inflightMu.Unlock()
+	qm.inflightCount[queueURL] -= count
+	if qm.inflightCount[queueURL] < 0 {
+		qm.inflightCount[queueURL] = 0
+	}
+}
+
+func (qm *QuotaManager) GetInflightCount(queueURL string) int64 {
+	qm.inflightMu.RLock()
+	defer qm.inflightMu.RUnlock()
+	return qm.inflightCount[queueURL]
+}
+
+func (qm *QuotaManager) GetMaxInflightLimit() int64 {
+	return qm.cfg.SQS.Standard.MaxInflightMessages
+}
+
+func (qm *QuotaManager) CheckMessageSize(messageSize int64) (bool, string) {
+	maxSize := qm.cfg.SQS.MaxMessageSize
+
+	if messageSize > maxSize {
+		return false, fmt.Sprintf("Message size %d exceeds maximum allowed size %d", messageSize, maxSize)
+	}
+	return true, ""
+}
+
+func (qm *QuotaManager) CheckBatchSize(numEntries int) (bool, string) {
+	maxBatchSize := qm.cfg.SQS.MaxBatchSize
+	if int64(numEntries) > maxBatchSize {
+		return false, fmt.Sprintf("Batch contains %d entries, maximum allowed is %d", numEntries, maxBatchSize)
+	}
+	return true, ""
 }

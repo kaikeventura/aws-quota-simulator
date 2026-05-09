@@ -26,6 +26,7 @@ const (
 	fifoQueueTPS       = 5
 	receiveQueueTPS   = 500
 	batchQueueTPS      = 5
+	standardSendTPS    = 10
 	quotaSimulatorPort = 4567
 	flociPort          = 4566
 )
@@ -84,12 +85,13 @@ func setupTestContainers(t *testing.T) (testcontainers.Container, int, func()) {
 		Image:        imageName,
 		ExposedPorts: []string{fmt.Sprintf("%d/tcp", quotaSimulatorPort)},
 		Env: map[string]string{
-			"UPSTREAM_URL":               fmt.Sprintf("http://%s:%d", flociIP, flociPort),
-			"QUOTA_SQS_FIFO_TPS":         strconv.Itoa(fifoQueueTPS),
-			"QUOTA_SQS_FIFO_RECEIVE_TPS": strconv.Itoa(receiveQueueTPS),
-			"QUOTA_SQS_FIFO_DELETE_TPS":  strconv.Itoa(fifoQueueTPS),
-			"QUOTA_SQS_FIFO_BATCH_TPS":   strconv.Itoa(batchQueueTPS),
-			"STARTUP_DELAY":              "3",
+			"UPSTREAM_URL":                fmt.Sprintf("http://%s:%d", flociIP, flociPort),
+			"QUOTA_SQS_FIFO_TPS":          strconv.Itoa(fifoQueueTPS),
+			"QUOTA_SQS_FIFO_RECEIVE_TPS":  strconv.Itoa(receiveQueueTPS),
+			"QUOTA_SQS_FIFO_DELETE_TPS":   strconv.Itoa(fifoQueueTPS),
+			"QUOTA_SQS_FIFO_BATCH_TPS":    strconv.Itoa(batchQueueTPS),
+			"QUOTA_SQS_STANDARD_SEND_TPS": strconv.Itoa(standardSendTPS),
+			"STARTUP_DELAY":               "3",
 		},
 		WaitingFor: wait.ForHTTP("/health").WithStartupTimeout(60 * time.Second),
 	}
@@ -129,7 +131,7 @@ func isThrottleError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "Throttl")
 }
 
-func TestStandardNoThrottle(t *testing.T) {
+func TestStandardThrottling(t *testing.T) {
 	if os.Getenv("SKIP_INTEGRATION") == "1" {
 		t.Skip("Skipping integration test")
 	}
@@ -146,16 +148,59 @@ func TestStandardNoThrottle(t *testing.T) {
 
 	queueURL := *resp.QueueUrl
 
-	for i := 0; i < 20; i++ {
-		_, err := client.SendMessage(context.Background(), &sqs.SendMessageInput{
-			QueueUrl:    aws.String(queueURL),
-			MessageBody: aws.String("test"),
-		})
-		require.NoError(t, err, "Standard queue should not throttle")
-		time.Sleep(50 * time.Millisecond)
+	t.Logf("Standard queue URL: %s", queueURL)
+	t.Logf("Standard Send TPS configured: %d", standardSendTPS)
+
+	msgInput := &sqs.SendMessageInput{
+		QueueUrl:    aws.String(queueURL),
+		MessageBody: aws.String("test"),
 	}
 
-	t.Log("Standard queue: OK - no throttling as expected")
+	var wg sync.WaitGroup
+	errCh := make(chan error, 200)
+
+	numWorkers := 10
+	numMessages := 200
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < numMessages/numWorkers; j++ {
+				_, err := client.SendMessage(context.Background(), msgInput)
+				if err != nil {
+					errCh <- err
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(errCh)
+	}()
+
+	throttled := false
+	var lastErr error
+
+	select {
+	case err := <-errCh:
+		lastErr = err
+		if isThrottleError(err) {
+			throttled = true
+			t.Logf("SUCCESS: Standard queue throttled! Error: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+	}
+
+	wg.Wait()
+
+	if !throttled {
+		t.Logf("Sent %d messages without throttle. Last error: %v", numMessages, lastErr)
+	}
+
+	require.True(t, throttled, "Expected throttling with Standard TPS=%d, sent %d messages with %d workers", standardSendTPS, numMessages, numWorkers)
 }
 
 func TestFIFOThrottling(t *testing.T) {
