@@ -2,6 +2,15 @@
 
 > Um proxy que adiciona controle de quotas da AWS real aos emuladores locais como Floci e LocalStack.
 
+## Status da Implementação
+
+| Serviço | Modo | Status | Testes de Integração |
+|---------|------|--------|---------------------|
+| **SQS FIFO** | - | ✅ Completo | ✅ Passando |
+| **SQS Standard** | - | ✅ Completo | ✅ Passando |
+| **DynamoDB** | On-Demand | ✅ Funcionando | ✅ Passando |
+| **DynamoDB** | Provisioned | ❌ Em desenvolvimento | ❌ Falhando |
+
 ## Por que usar?
 
 Quando você desenvolve localmente com Floci ou LocalStack, os serviços funcionam perfeitamente sem limites. Mas na AWS real existem quotas de throttling que podem quebrar sua aplicação em produção.
@@ -18,7 +27,7 @@ Quando você desenvolve localmente com Floci ou LocalStack, os serviços funcion
 |---------|--------|---------------------|
 | **SQS FIFO** | ✅ Completo | SendMessage, ReceiveMessage, DeleteMessage, SendMessageBatch, DeleteMessageBatch, Deduplicação, Throttling |
 | **SQS Standard** | ✅ Completo | Throttling, Message Size, Batch Size, Inflight Messages |
-| **DynamoDB** | ⚠️ Parcial | PutItem, GetItem (em desenvolvimento) |
+| **DynamoDB** | ⚠️ Parcial | On-Demand Throttling ✅ |
 
 ---
 
@@ -94,16 +103,68 @@ Quando você desenvolve localmente com Floci ou LocalStack, os serviços funcion
 }
 ```
 
-### DynamoDB - Quotas (Em Desenvolvimento)
+### DynamoDB - Quotas Implementadas
 
-| Operação | Tipo | Status |
-|----------|------|--------|
-| PutItem | Write | ⚠️ Parcial |
-| GetItem | Read | ⚠️ Parcial |
-| BatchWriteItem | Write | ⏳ Planejado |
-| BatchGetItem | Read | ⏳ Planejado |
+#### On-Demand Mode (PAY_PER_REQUEST)
+
+| Operação | Limite Padrão (AWS) | Configurável | Variável de Ambiente |
+|----------|---------------------|--------------|---------------------|
+| Read (GetItem, Query, Scan) | 40,000 RRU/tabela | ✅ | `QUOTA_DYNAMODB_ONDEMAND_MAX_READ_RPS` |
+| Write (PutItem, DeleteItem, UpdateItem) | 40,000 WRU/tabela | ✅ | `QUOTA_DYNAMODB_ONDEMAND_MAX_WRITE_RPS` |
+| Initial Read Allocation | 2,000 RRU | ✅ | `QUOTA_DYNAMODB_ONDEMAND_INITIAL_READ_RPS` |
+| Initial Write Allocation | 2,000 WRU | ✅ | `QUOTA_DYNAMODB_ONDEMAND_INITIAL_WRITE_RPS` |
+
+#### Provisioned Mode (PROVISIONED)
+
+| Operação | Limite Padrão (AWS) | Configurável | Variável de Ambiente |
+|----------|---------------------|--------------|---------------------|
+| Per-table Read (RCU) | 40,000 RCU | ✅ | `QUOTA_DYNAMODB_PROVISIONED_PER_TABLE_RCU` |
+| Per-table Write (WCU) | 40,000 WCU | ✅ | `QUOTA_DYNAMODB_PROVISIONED_PER_TABLE_WCU` |
+| Account-level Read | 80,000 RCU | ✅ | `QUOTA_DYNAMODB_PROVISIONED_ACCOUNT_MAX_RCU` |
+| Account-level Write | 80,000 WCU | ✅ | `QUOTA_DYNAMODB_PROVISIONED_ACCOUNT_MAX_WCU` |
+
+#### Cálculo de RCU/WCU
+
+| Operação | Consumo |
+|----------|---------|
+| GetItem (4KB) | 0.5 RCU (strongly consistent) |
+| GetItem (4KB) | 0.25 RCU (eventually consistent) |
+| PutItem (1KB) | 1 WCU |
+| DeleteItem (1KB) | 1 WCU |
+| UpdateItem (1KB) | 1 WCU |
+| Query (per 4KB) | 0.5 RCU |
+| Scan (per 4KB) | 0.5 RCU |
+
+**Billing Mode Detection:**
+- O simulador detecta automaticamente `PROVISIONED` vs `PAY_PER_REQUEST` pelo CreateTable
+- Armazena o billing mode em memória por tabela
+
+### Limitações Conhecidas
+
+#### DynamoDB - Em Desenvolvimento
+
+| Funcionalidade | Status | Observação |
+|----------------|--------|------------|
+| **On-Demand Throttling** | ✅ Funcionando | PutItem, GetItem, DeleteItem, UpdateItem, Query, Scan |
+| **Batch Operations Throttling** | ⚠️ Parcial | Detecção implementada, throttling pode variar |
+| **Provisioned Mode Throttling** | ❌ Não implementado | Tabelas não são encontradas no cache |
+| **Account-level Limits** | ❌ Não implementado | Necessário para provisioned mode |
+| **GSI/LSI Limits** | ❌ Não implementado | Secondary indexes não suportados |
+| **ReturnConsumedCapacity** | ❌ Não implementado | Resposta de capacidade não retornada |
+
+#### Testes de Integração
+
+```bash
+# Run only On-Demand tests (these are passing):
+go test ./internal/quota/services/... -run "TestOnDemandTableThrottling" -v
+
+# Run all DynamoDB tests:
+go test ./internal/quota/services/... -run "TestDynamoDB.*Throttling" -v
+```
 
 ---
+
+**Nota:** O throttling On-Demand está funcionando corretamente e os testes de integração passam. O modo Provisionado precisa de implementação adicional do cache de tabelas.
 
 ## Arquitetura
 
@@ -241,16 +302,19 @@ sqs:
 
 dynamodb:
   on_demand:
-    initial_read_rps: 4000
-    initial_write_rps: 4000
-    account_max_read_rps: 40000
-    account_max_write_rps: 40000
-    max_table_rps: 40000
+    initial_read_rps: 2000
+    initial_write_rps: 2000
+    max_table_read_rps: 40000
+    max_table_write_rps: 40000
   provisioned:
     per_table_max_rcu: 40000
     per_table_max_wcu: 40000
     account_max_rcu: 80000
     account_max_wcu: 80000
+    min_capacity: 1
+  default:
+    table_max_rcu: 10000
+    table_max_wcu: 10000
 
 proxy:
   host: "0.0.0.0"
@@ -283,11 +347,26 @@ proxy:
 | `QUOTA_SQS_MAX_MESSAGE_SIZE` | Tamanho máximo da mensagem (bytes) | 262144 (256KB) |
 | `QUOTA_SQS_MAX_BATCH_SIZE` | Máximo de mensagens por batch | 10 |
 
+#### DynamoDB On-Demand
+| Variável | Descrição | Padrão |
+|----------|-----------|--------|
+| `QUOTA_DYNAMODB_ONDEMAND_MAX_READ_RPS` | Read RPS max por tabela (RRU) | 40000 |
+| `QUOTA_DYNAMODB_ONDEMAND_MAX_WRITE_RPS` | Write RPS max por tabela (WRU) | 40000 |
+| `QUOTA_DYNAMODB_ONDEMAND_INITIAL_READ_RPS` | Initial read allocation | 2000 |
+| `QUOTA_DYNAMODB_ONDEMAND_INITIAL_WRITE_RPS` | Initial write allocation | 2000 |
+
+#### DynamoDB Provisioned
+| Variável | Descrição | Padrão |
+|----------|-----------|--------|
+| `QUOTA_DYNAMODB_PROVISIONED_PER_TABLE_RCU` | Max RCU por tabela | 40000 |
+| `QUOTA_DYNAMODB_PROVISIONED_PER_TABLE_WCU` | Max WCU por tabela | 40000 |
+| `QUOTA_DYNAMODB_PROVISIONED_ACCOUNT_MAX_RCU` | Max RCU agregada por account | 80000 |
+| `QUOTA_DYNAMODB_PROVISIONED_ACCOUNT_MAX_WCU` | Max WCU agregada por account | 80000 |
+
 #### Geral
 | Variável | Descrição | Padrão |
 |----------|-----------|--------|
 | `SQS_DEDUP_TTL_MINUTES` | TTL do cache de deduplicação | 5 |
-| `QUOTA_DYNAMODB_ONDEMAND_MAX_RPS` | RPS max DynamoDB | 40000 |
 | `PROXY_PORT` | Porta do proxy | 4567 |
 | `UPSTREAM_URL` | URL do Floci | http://localhost:4566 |
 | `STARTUP_DELAY` | Delay (segundos) | 0 |
@@ -300,7 +379,10 @@ quota-simulator:
   environment:
     - QUOTA_SQS_FIFO_TPS=300
     - SQS_DEDUP_TTL_MINUTES=5
-    - QUOTA_DYNAMODB_ONDEMAND_MAX_RPS=40000
+    - QUOTA_DYNAMODB_ONDEMAND_MAX_READ_RPS=40000
+    - QUOTA_DYNAMODB_ONDEMAND_MAX_WRITE_RPS=40000
+    - QUOTA_DYNAMODB_PROVISIONED_PER_TABLE_RCU=100
+    - QUOTA_DYNAMODB_PROVISIONED_PER_TABLE_WCU=50
 ```
 
 ---
@@ -374,6 +456,90 @@ Quando exceder 300 TPS, você verá erros como:
 
 ```
 Throttling detected: RequestThrottled: Rate limit exceeded for queue
+```
+
+### DynamoDB - Exemplo de teste
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "time"
+
+    "github.com/aws/aws-sdk-go-v2/aws"
+    "github.com/aws/aws-sdk-go-v2/config"
+    "github.com/aws/aws-sdk-go-v2/service/dynamodb"
+    "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+)
+
+func main() {
+    ctx := context.Background()
+
+    cfg, _ := config.LoadDefaultConfig(ctx,
+        config.WithRegion("us-east-1"),
+        config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
+            func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+                return aws.Endpoint{URL: "http://localhost:4567"}, nil
+            }),
+        ),
+    )
+
+    client := dynamodb.NewFromConfig(cfg)
+    tableName := "test-table"
+
+    // Criar tabela On-Demand
+    _, err := client.CreateTable(ctx, &dynamodb.CreateTableInput{
+        TableName: aws.String(tableName),
+        KeySchema: []types.KeySchemaElement{
+            {AttributeName: aws.String("id"), KeyType: types.KeyTypeHash},
+        },
+        AttributeDefinitions: []types.AttributeDefinition{
+            {AttributeName: aws.String("id"), AttributeType: types.ScalarAttributeTypeS},
+        },
+        BillingMode: types.BillingModePayPerRequest,
+    })
+    if err != nil {
+        fmt.Printf("Error creating table: %v\n", err)
+        return
+    }
+
+    time.Sleep(2 * time.Second)
+
+    var count int
+    ticker := time.NewTicker(1 * time.Second)
+
+    for {
+        _, err := client.PutItem(ctx, &dynamodb.PutItemInput{
+            TableName: aws.String(tableName),
+            Item: map[string]types.AttributeValue{
+                "id":   &types.AttributeValueMemberS{Value: fmt.Sprintf("item-%d", count)},
+                "data": &types.AttributeValueMemberS{Value: "test"},
+            },
+        })
+
+        if err != nil {
+            fmt.Printf("Throttling detected: %v\n", err)
+            time.Sleep(100 * time.Millisecond)
+            continue
+        }
+
+        count++
+
+        select {
+        case <-ticker.C:
+            fmt.Printf("Items written: %d\n", count)
+        default:
+        }
+    }
+}
+```
+
+Quando exceder o limite On-Demand (40,000 WRU padrão), você verá:
+
+```
+Throttling detected: ProvisionedThroughputExceededException: On-demand write throughput exceeded for table: test-table
 ```
 
 ---
@@ -511,7 +677,7 @@ go test -v ./internal/quota/services/... -run "Dedup"
 go test -v ./internal/quota/services/... -run "Throttl"
 ```
 
-**Casos de teste disponíveis:**
+**Casos de teste disponíveis - SQS:**
 
 | Teste | Descrição |
 |-------|-----------|
@@ -524,6 +690,15 @@ go test -v ./internal/quota/services/... -run "Throttl"
 | `TestFIFONoDedupWithoutContentBasedDeduplication` | Valida que sem config não há dedup |
 | `TestFIFODedupDifferentGroups` | Valida que mesmo ID em grupos diferentes é permitido |
 
+**Casos de teste disponíveis - DynamoDB:**
+
+| Teste | Descrição |
+|-------|-----------|
+| `TestOnDemandTableThrottling` | Valida throttling em tabelas On-Demand (write) |
+| `TestProvisionedTableThrottling` | Valida throttling em tabelas Provisioned (write) |
+| `TestProvisionedReadThrottling` | Valida throttling de leitura em tabelas Provisioned |
+| `TestOnDemandQueryThrottling` | Valida throttling em Scan/Query (On-Demand) |
+
 **Configuração de quotas para testes:**
 
 Os testes de integração usam quotas reduzidas para permitir validação rápida:
@@ -532,8 +707,12 @@ Os testes de integração usam quotas reduzidas para permitir validação rápid
 - `QUOTA_SQS_FIFO_RECEIVE_TPS=500`
 - `QUOTA_SQS_FIFO_BATCH_TPS=5` (em vez de 3000)
 - `QUOTA_SQS_STANDARD_SEND_TPS=10` (para validar throttling rápido)
+- `QUOTA_DYNAMODB_ONDEMAND_MAX_READ_RPS=50` (On-Demand)
+- `QUOTA_DYNAMODB_ONDEMAND_MAX_WRITE_RPS=50` (On-Demand)
+- `QUOTA_DYNAMODB_PROVISIONED_PER_TABLE_RCU=10` (Provisioned)
+- `QUOTA_DYNAMODB_PROVISIONED_PER_TABLE_WCU=10` (Provisioned)
 
-Isso permite testar throttling em poucos segundos ao invés de precisar atingir 300+ TPS.
+Isso permite testar throttling em poucos segundos ao invés de precisar atingir as quotas reais.
 
 ---
 

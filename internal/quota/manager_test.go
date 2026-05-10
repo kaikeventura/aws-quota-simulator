@@ -85,7 +85,8 @@ func TestQuotaManager_New(t *testing.T) {
 		},
 		DynamoDB: config.DynamoDBConfig{
 			OnDemand: config.OnDemandConfig{
-				MaxTableRPS: 40000,
+				MaxTableReadRPS:  40000,
+				MaxTableWriteRPS: 40000,
 			},
 		},
 	}

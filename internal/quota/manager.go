@@ -189,7 +189,7 @@ func (qm *QuotaManager) GetLimiter(service, resource string) *ResourceLimiter {
 			burst = qm.cfg.SQS.Standard.BurstLimit
 		}
 	case "dynamodb":
-		rate = qm.cfg.DynamoDB.OnDemand.MaxTableRPS
+		rate = qm.cfg.DynamoDB.OnDemand.MaxTableReadRPS
 		burst = rate * 2
 	}
 
@@ -282,5 +282,119 @@ func (qm *QuotaManager) CheckBatchSize(numEntries int) (bool, string) {
 	if int64(numEntries) > maxBatchSize {
 		return false, fmt.Sprintf("Batch contains %d entries, maximum allowed is %d", numEntries, maxBatchSize)
 	}
+	return true, ""
+}
+
+func (qm *QuotaManager) CheckDynamoDBThrottle(operation, table string, body []byte) (bool, string) {
+	dynamoSvcRaw, ok := qm.GetService("dynamodb")
+	if !ok {
+		return true, ""
+	}
+	dynamoSvc := dynamoSvcRaw.(*services.DynamoDBService)
+
+	if operation == "create_table" {
+		tableName, billingMode, rcu, wcu := dynamoSvc.ParseCreateTableRequest(body)
+		if tableName == "" {
+			return true, ""
+		}
+		dynamoSvc.RegisterTable(tableName, billingMode, rcu, wcu)
+		return true, ""
+	}
+
+	billingMode := dynamoSvc.GetBillingMode(table)
+
+	if billingMode == services.BillingModeProvisioned {
+		return qm.checkProvisionedThrottle(dynamoSvc, operation, table, body)
+	}
+
+	return qm.checkOnDemandThrottle(dynamoSvc, operation, table, body)
+}
+
+func (qm *QuotaManager) checkProvisionedThrottle(dynamoSvc *services.DynamoDBService, operation, table string, body []byte) (bool, string) {
+	meta, ok := dynamoSvc.GetTableMetadata(table)
+	if !ok {
+		return true, ""
+	}
+
+	if dynamoSvc.IsReadOperation(operation) {
+		if meta.ProvisionedRCU <= 0 {
+			return false, fmt.Sprintf("No read capacity provisioned for table %s", table)
+		}
+
+		consumed := int64(1)
+		if operation == "batch_get_item" && len(body) > 0 {
+			consumed = dynamoSvc.CalculateBatchGetRCU(table, body, false)
+		}
+
+		accountUsed := dynamoSvc.GetAccountUsedRCU()
+		accountMax := dynamoSvc.GetAccountMaxRCU()
+		if accountUsed+consumed > accountMax {
+			return false, fmt.Sprintf("Account read capacity exceeded: used=%d, max=%d", accountUsed, accountMax)
+		}
+		dynamoSvc.ConsumeAccountRCU(consumed)
+	}
+
+	if dynamoSvc.IsWriteOperation(operation) {
+		if meta.ProvisionedWCU <= 0 {
+			return false, fmt.Sprintf("No write capacity provisioned for table %s", table)
+		}
+
+		consumed := int64(1)
+		if operation == "batch_write_item" && len(body) > 0 {
+			consumed = dynamoSvc.CalculateBatchWriteWCU(table, body)
+		}
+
+		accountUsed := dynamoSvc.GetAccountUsedWCU()
+		accountMax := dynamoSvc.GetAccountMaxWCU()
+		if accountUsed+consumed > accountMax {
+			return false, fmt.Sprintf("Account write capacity exceeded: used=%d, max=%d", accountUsed, accountMax)
+		}
+		dynamoSvc.ConsumeAccountWCU(consumed)
+	}
+
+	return true, ""
+}
+
+func (qm *QuotaManager) checkOnDemandThrottle(dynamoSvc *services.DynamoDBService, operation, table string, body []byte) (bool, string) {
+	limiter := qm.GetLimiter("dynamodb", table)
+
+	if dynamoSvc.IsReadOperation(operation) {
+		consumed := 1
+		if operation == "batch_get_item" && len(body) > 0 {
+			batchItems, err := dynamoSvc.ParseBatchGetItem(body)
+			if err == nil {
+				if count, ok := batchItems[table]; ok {
+					consumed = count
+				}
+			}
+		}
+
+		bucket := limiter.GetOrCreate(table+"-read", dynamoSvc.GetOnDemandMaxReadRPS(), dynamoSvc.GetOnDemandInitialReadRPS())
+		for i := 0; i < consumed; i++ {
+			if !bucket.Allow() {
+				return false, fmt.Sprintf("On-demand read throughput exceeded for table %s", table)
+			}
+		}
+	}
+
+	if dynamoSvc.IsWriteOperation(operation) {
+		consumed := 1
+		if operation == "batch_write_item" && len(body) > 0 {
+			batchItems, err := dynamoSvc.ParseBatchWriteItem(body)
+			if err == nil {
+				if count, ok := batchItems[table]; ok {
+					consumed = count
+				}
+			}
+		}
+
+		bucket := limiter.GetOrCreate(table+"-write", dynamoSvc.GetOnDemandMaxWriteRPS(), dynamoSvc.GetOnDemandInitialWriteRPS())
+		for i := 0; i < consumed; i++ {
+			if !bucket.Allow() {
+				return false, fmt.Sprintf("On-demand write throughput exceeded for table %s", table)
+			}
+		}
+	}
+
 	return true, ""
 }
