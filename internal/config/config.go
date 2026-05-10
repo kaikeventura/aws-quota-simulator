@@ -49,17 +49,16 @@ type FIFOQueueConfig struct {
 }
 
 type DynamoDBConfig struct {
-	OnDemand  OnDemandConfig  `yaml:"on_demand"`
-	Provisioned ProvisionedConfig `yaml:"provisioned"`
-	Default   DynamoDBDefaultConfig `yaml:"default"`
+	OnDemand    OnDemandConfig        `yaml:"on_demand"`
+	Provisioned ProvisionedConfig     `yaml:"provisioned"`
+	Default     DynamoDBDefaultConfig `yaml:"default"`
 }
 
 type OnDemandConfig struct {
 	InitialReadRPS     int64 `yaml:"initial_read_rps"`
 	InitialWriteRPS    int64 `yaml:"initial_write_rps"`
-	AccountMaxReadRPS  int64 `yaml:"account_max_read_rps"`
-	AccountMaxWriteRPS int64 `yaml:"account_max_write_rps"`
-	MaxTableRPS        int64 `yaml:"max_table_rps"`
+	MaxTableReadRPS    int64 `yaml:"max_table_read_rps"`
+	MaxTableWriteRPS   int64 `yaml:"max_table_write_rps"`
 }
 
 type ProvisionedConfig struct {
@@ -120,6 +119,39 @@ func setDefaults(cfg *Config) {
 	if cfg.SQS.MaxBatchSize <= 0 {
 		cfg.SQS.MaxBatchSize = 10
 	}
+	if cfg.DynamoDB.OnDemand.InitialReadRPS <= 0 {
+		cfg.DynamoDB.OnDemand.InitialReadRPS = 2000
+	}
+	if cfg.DynamoDB.OnDemand.InitialWriteRPS <= 0 {
+		cfg.DynamoDB.OnDemand.InitialWriteRPS = 2000
+	}
+	if cfg.DynamoDB.OnDemand.MaxTableReadRPS <= 0 {
+		cfg.DynamoDB.OnDemand.MaxTableReadRPS = 40000
+	}
+	if cfg.DynamoDB.OnDemand.MaxTableWriteRPS <= 0 {
+		cfg.DynamoDB.OnDemand.MaxTableWriteRPS = 40000
+	}
+	if cfg.DynamoDB.Provisioned.PerTableMaxRCU <= 0 {
+		cfg.DynamoDB.Provisioned.PerTableMaxRCU = 40000
+	}
+	if cfg.DynamoDB.Provisioned.PerTableMaxWCU <= 0 {
+		cfg.DynamoDB.Provisioned.PerTableMaxWCU = 40000
+	}
+	if cfg.DynamoDB.Provisioned.AccountMaxRCU <= 0 {
+		cfg.DynamoDB.Provisioned.AccountMaxRCU = 80000
+	}
+	if cfg.DynamoDB.Provisioned.AccountMaxWCU <= 0 {
+		cfg.DynamoDB.Provisioned.AccountMaxWCU = 80000
+	}
+	if cfg.DynamoDB.Provisioned.MinCapacity <= 0 {
+		cfg.DynamoDB.Provisioned.MinCapacity = 1
+	}
+	if cfg.DynamoDB.Default.TableMaxRCU <= 0 {
+		cfg.DynamoDB.Default.TableMaxRCU = 10000
+	}
+	if cfg.DynamoDB.Default.TableMaxWCU <= 0 {
+		cfg.DynamoDB.Default.TableMaxWCU = 10000
+	}
 }
 
 func applyEnvOverrides(cfg *Config) {
@@ -178,9 +210,44 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.SQS.MaxBatchSize = val
 		}
 	}
-	if v := os.Getenv("QUOTA_DYNAMODB_ONDEMAND_MAX_RPS"); v != "" {
+	if v := os.Getenv("QUOTA_DYNAMODB_ONDEMAND_MAX_READ_RPS"); v != "" {
 		if val := parseInt64(v); val > 0 {
-			cfg.DynamoDB.OnDemand.MaxTableRPS = val
+			cfg.DynamoDB.OnDemand.MaxTableReadRPS = val
+		}
+	}
+	if v := os.Getenv("QUOTA_DYNAMODB_ONDEMAND_MAX_WRITE_RPS"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.DynamoDB.OnDemand.MaxTableWriteRPS = val
+		}
+	}
+	if v := os.Getenv("QUOTA_DYNAMODB_ONDEMAND_INITIAL_READ_RPS"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.DynamoDB.OnDemand.InitialReadRPS = val
+		}
+	}
+	if v := os.Getenv("QUOTA_DYNAMODB_ONDEMAND_INITIAL_WRITE_RPS"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.DynamoDB.OnDemand.InitialWriteRPS = val
+		}
+	}
+	if v := os.Getenv("QUOTA_DYNAMODB_PROVISIONED_PER_TABLE_RCU"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.DynamoDB.Provisioned.PerTableMaxRCU = val
+		}
+	}
+	if v := os.Getenv("QUOTA_DYNAMODB_PROVISIONED_PER_TABLE_WCU"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.DynamoDB.Provisioned.PerTableMaxWCU = val
+		}
+	}
+	if v := os.Getenv("QUOTA_DYNAMODB_PROVISIONED_ACCOUNT_MAX_RCU"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.DynamoDB.Provisioned.AccountMaxRCU = val
+		}
+	}
+	if v := os.Getenv("QUOTA_DYNAMODB_PROVISIONED_ACCOUNT_MAX_WCU"); v != "" {
+		if val := parseInt64(v); val > 0 {
+			cfg.DynamoDB.Provisioned.AccountMaxWCU = val
 		}
 	}
 	if v := os.Getenv("PROXY_PORT"); v != "" {

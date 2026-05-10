@@ -80,13 +80,13 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	service := detectService(path)
 	if service == "" {
-		service = detectServiceFromHost(host)
+		service = detectServiceFromAction(action)
 	}
 	if service == "" {
 		service = detectServiceFromQuery(query)
 	}
 	if service == "" {
-		service = detectServiceFromAction(action)
+		service = detectServiceFromHost(host)
 	}
 
 	fmt.Printf("[REQUEST] path=%s host=%s action=%s service=%s\n", path, host, action, service)
@@ -142,7 +142,7 @@ func (h *ProxyHandler) checkQuota(service, path, query, action string, body []by
 	case "sqs":
 		return h.checkSQSQuota(path, query, action, body)
 	case "dynamodb":
-		return h.checkDynamoDBQuota(path, body)
+		return h.checkDynamoDBQuota(path, query, action, body)
 	default:
 		return true, ""
 	}
@@ -237,28 +237,60 @@ func (h *ProxyHandler) checkSQDeduplication(operation string, isFIFO bool, queue
 	return false
 }
 
-func (h *ProxyHandler) checkDynamoDBQuota(path string, body []byte) (bool, string) {
+func (h *ProxyHandler) checkDynamoDBQuota(path, query, action string, body []byte) (bool, string) {
 	dynamoSvcRaw, ok := h.quotaManager.GetService("dynamodb")
 	if !ok {
 		return true, ""
 	}
 	dynamoSvc := dynamoSvcRaw.(*services.DynamoDBService)
 
-	operation, table := dynamoSvc.DetectOperation(path)
+	operation, table := dynamoSvc.DetectOperation(path, action)
 	if operation == "" {
 		return true, ""
 	}
 
-	if table == "" {
+	if table == "" && len(body) > 0 {
 		table = dynamoSvc.ParseTableName(body)
 	}
 
-	allowed, _ := h.quotaManager.CheckRateLimit("dynamodb", table)
-	if !allowed {
-		return false, "Rate exceeded for table: " + table
+	if table == "" {
+		table = extractTableNameFromQuery(query)
 	}
 
-	return true, ""
+	if table == "" && operation != "create_table" {
+		return true, ""
+	}
+
+	return h.quotaManager.CheckDynamoDBThrottle(operation, table, body)
+}
+
+func extractTableNameFromQuery(path string) string {
+	pathLower := strings.ToLower(path)
+
+	patterns := []string{
+		"tablename=",
+		"table_name=",
+	}
+
+	for _, pattern := range patterns {
+		idx := strings.Index(pathLower, pattern)
+		if idx >= 0 {
+			start := idx + len(pattern)
+			end := start
+			for end < len(path) {
+				c := path[end]
+				if c == '&' || c == ' ' || c == '\n' || c == '\r' {
+					break
+				}
+				end++
+			}
+			tableName := path[start:end]
+			if tableName != "" {
+				return tableName
+			}
+		}
+	}
+	return ""
 }
 
 func detectService(path string) string {
